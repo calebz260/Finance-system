@@ -1,0 +1,77 @@
+@import 'tailwindcss';
+
+/**
+ * Design tokens.
+ *
+ * Declared once here so every screen -- parent portal, bursar dashboard, reports --
+ * shares the same palette and type scale. Status colours are named for their financial
+ * meaning (paid / partial / outstanding / overdue) rather than for their hue, so a later
+ * palette change does not require touching component code.
+ */
+@theme {
+  --font-sans:
+    'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, monospace;
+
+  /* Brand: a deep teal that reads as institutional rather than playful. */
+  --color-brand-50: oklch(0.977 0.013 197);
+  --color-brand-100: oklch(0.951 0.028 197);
+  --color-brand-200: oklch(0.905 0.056 197);
+  --color-brand-300: oklch(0.835 0.083 197);
+  --color-brand-400: oklch(0.73 0.099 197);
+  --color-brand-500: oklch(0.63 0.098 197);
+  --color-brand-600: oklch(0.53 0.086 200);
+  --color-brand-700: oklch(0.44 0.072 203);
+  --color-brand-800: oklch(0.37 0.058 206);
+  --color-brand-900: oklch(0.31 0.045 209);
+  --color-brand-950: oklch(0.22 0.032 212);
+
+  /* Financial status colours. */
+  --color-status-paid: oklch(0.6 0.13 150);
+  --color-status-partial: oklch(0.75 0.14 85);
+  --color-status-outstanding: oklch(0.65 0.17 45);
+  --color-status-overdue: oklch(0.58 0.2 25);
+  --color-status-pending: oklch(0.65 0.1 255);
+}
+
+/* Respect the operating-system preference; staff often work in bright offices and
+   parents often check balances at night. */
+@layer base {
+  :root {
+    color-scheme: light dark;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-slate-50 font-sans text-slate-900 antialiased;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    body {
+      @apply bg-slate-950 text-slate-100;
+    }
+  }
+
+  /* A visible focus ring everywhere is a WCAG 2.1 AA requirement (Section 3). */
+  :focus-visible {
+    @apply outline-brand-600 outline-2 outline-offset-2;
+  }
+
+  /* Monetary figures line up in tables only with tabular figures. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  /* Skip link: hidden until focused by a keyboard user. */
+  .skip-link {
+    @apply sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50
+      focus:rounded-md focus:bg-white focus:px-4 focus:py-2 focus:text-brand-700
+      focus:shadow-lg;
+  }
+}

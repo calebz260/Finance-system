@@ -1,0 +1,33 @@
+# Local development infrastructure for the School Finance System.
+# Production uses a managed/hardened PostgreSQL instance -- see docs/DEPLOYMENT.md.
+name: school-finance-system
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: sfs-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sfs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sfs_local_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-school_finance}
+      # Deterministic collation so ORDER BY on names is stable across machines.
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      # Deliberately not 5432: developer machines commonly already run another
+      # PostgreSQL on the default port. Override with POSTGRES_PORT if 5544 clashes too.
+      - '${POSTGRES_PORT:-5544}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-sfs} -d ${POSTGRES_DB:-school_finance}']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  postgres-data:
+    name: sfs-postgres-data

@@ -1,0 +1,43 @@
+{
+  "name": "@sfs/frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "School Finance System web client.",
+  "type": "module",
+  "scripts": {
+    "prepare:deps": "npm run build -w @sfs/shared",
+    "predev": "npm run prepare:deps",
+    "dev": "vite",
+    "prebuild": "npm run prepare:deps",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "pretypecheck": "npm run prepare:deps",
+    "typecheck": "tsc --noEmit",
+    "pretest": "npm run prepare:deps",
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@sfs/shared": "^0.1.0",
+    "clsx": "^2.1.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-router": "^7.18.4",
+    "tailwind-merge": "^3.7.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.7",
+    "jsdom": "^29.1.1",
+    "tailwindcss": "^4.3.3",
+    "vite": "^8.3.0"
+  }
+}
