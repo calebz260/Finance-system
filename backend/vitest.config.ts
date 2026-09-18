@@ -11,9 +11,9 @@ import { defineConfig } from 'vitest/config';
  * Integration tests point at a dedicated database (`TEST_DATABASE_URL`). A test run
  * truncates it, so it must never be the development or production database.
  */
-const TEST_DATABASE_URL =
-  process.env.TEST_DATABASE_URL ??
-  'postgresql://sfs:sfs_local_dev_password@localhost:5544/school_finance_test?schema=public';
+// `.js` specifier, resolved to the `.ts` source: it satisfies the backend's NodeNext
+// typecheck and Vite's resolver alike.
+import { TEST_DATABASE_URL } from './tests/test-database-url.js';
 
 const sharedEnv = {
   NODE_ENV: 'test',
@@ -45,6 +45,9 @@ export default defineConfig({
           include: ['tests/integration/**/*.test.ts'],
           env: sharedEnv,
           fileParallelism: false,
+          // Applies committed migrations to the test database once, before any test file,
+          // so `npm test` works from a clean checkout and in CI without an extra step.
+          globalSetup: ['tests/integration/global-setup.ts'],
           testTimeout: 30_000,
           hookTimeout: 30_000,
         },

@@ -94,3 +94,15 @@ export async function disconnectDatabase(): Promise<void> {
   await prisma.$disconnect();
   log.info('Database connection closed');
 }
+
+/**
+ * The client as seen inside `prisma.$transaction(async (tx) => …)`.
+ *
+ * Repository and service functions that participate in a larger financial operation take
+ * this type rather than the full client, which is what stops them from starting a nested
+ * transaction or running a write outside the caller's transaction by accident.
+ */
+export type PrismaTransactionClient = Omit<
+  PrismaClient,
+  '$connect' | '$disconnect' | '$on' | '$transaction' | '$extends'
+>;
