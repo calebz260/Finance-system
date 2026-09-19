@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   PasswordPolicyError,
+  assertPasswordAcceptable,
   assertPasswordLength,
   hashPassword,
   needsRehash,
@@ -56,6 +57,76 @@ describe('password policy', () => {
 
   it('refuses to hash a password that breaks the policy', async () => {
     await expect(hashPassword('tooshort')).rejects.toThrow(PasswordPolicyError);
+  });
+});
+
+describe('assertPasswordAcceptable', () => {
+  const identity = {
+    email: 'aline.mutesi@gskicukiro.invalid',
+    firstName: 'Aline',
+    lastName: 'Mutesi',
+  };
+
+  it('accepts a long password that has nothing to do with the account', () => {
+    expect(() => {
+      assertPasswordAcceptable('correct horse battery staple', identity);
+    }).not.toThrow();
+  });
+
+  it('applies the length floor', () => {
+    expect(() => {
+      assertPasswordAcceptable('Short1!', identity);
+    }).toThrow(/at least 12 characters/);
+  });
+
+  it('rejects passwords from the common-password list, whatever the casing or padding', () => {
+    // Credential stuffing tries exactly these first, and composition rules do not stop
+    // them: `Password123!` satisfies every classic rule.
+    for (const candidate of ['password123!', 'Password123!', 'P-a-s-s-w-o-r-d-1-2-3']) {
+      expect(() => {
+        assertPasswordAcceptable(candidate, identity);
+      }).toThrow(/commonly used/);
+    }
+  });
+
+  it('rejects a password built from the account holder`s own identity', () => {
+    // The targeted-guessing case: in a school, everyone knows everyone's name.
+    expect(() => {
+      assertPasswordAcceptable('AlineMutesi2026', identity);
+    }).toThrow(/must not contain your name/);
+
+    expect(() => {
+      assertPasswordAcceptable('aline.mutesi-rules', identity);
+    }).toThrow(/must not contain your name/);
+
+    expect(() => {
+      assertPasswordAcceptable('gskicukiro-forever', identity);
+    }).toThrow(/must not contain your name/);
+  });
+
+  it('ignores identity fragments too short to be meaningful', () => {
+    // Refusing every password containing a two-letter surname would reject sound
+    // passwords for no security gain.
+    expect(() => {
+      assertPasswordAcceptable('thunderous walnut carriage', {
+        email: 'jd@example.invalid',
+        firstName: 'Jo',
+        lastName: 'Ba',
+      });
+    }).not.toThrow();
+  });
+
+  it('rejects a single repeated character, which passes any length floor with no entropy', () => {
+    expect(() => {
+      assertPasswordAcceptable('aaaaaaaaaaaaaaaa', identity);
+    }).toThrow(/repeated character/);
+  });
+
+  it('does not impose composition rules, which push people towards guessable patterns', () => {
+    // No uppercase, no digit, no symbol -- and far stronger than `Passw0rd!`.
+    expect(() => {
+      assertPasswordAcceptable('violet trombone harvest', identity);
+    }).not.toThrow();
   });
 });
 

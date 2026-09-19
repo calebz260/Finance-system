@@ -25,7 +25,7 @@ last section of [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
-## ⬜ Phase 1 — Database and core domain
+## ✅ Phase 1 — Database and core domain
 
 Schools, users, roles, permissions, students, parents/guardians, student–parent relationships,
 academic years, **terms**, levels, classes, programmes/trades, departments, enrolments — with
@@ -35,12 +35,49 @@ tests.
 Conventions already fixed: `Decimal(14,2)` money, `timestamptz` UTC, UUID keys, snake_case
 table names, `version` columns for optimistic locking on co-edited rows.
 
-## ⬜ Phase 2 — Authentication and authorisation
+**Delivered:** the full domain schema across three migrations, the shared role and permission
+catalogue, seed data for a realistic school, the `AccessScope` tenant-scoping layer, the
+identifier sequence behind Student IDs, and the student repository as the reference
+implementation every later module follows.
+
+## ✅ Phase 2 — Authentication and authorisation
 
 Login, logout, password hashing (Argon2id), password reset, session/token management, **TOTP
 MFA for Bursar, Finance Manager, School Administrator and Super Administrator**, RBAC with
 backend enforcement, protected routes, account status, brute-force protection. Every role
 tested for what it may and may not do.
+
+**Delivered:**
+
+- Argon2id hashing with opportunistic rehash, and a NIST-shaped password policy (length floor,
+  common-password blocklist, no password built from the account&#39;s own identity) applied
+  wherever a password is _set_ and never where one is _presented_.
+- Server-side sessions with rotating refresh tokens. A consumed token presented again revokes
+  the whole session and is audited, because replay and theft are indistinguishable from the
+  request.
+- TOTP enrolment, verification and single-use recovery codes. Secrets are AES-256-GCM encrypted
+  at rest; an accepted step counter is stored so an observed code cannot be used twice.
+  Enrolment is forced at sign-in for the four high-privilege roles.
+- Per-account lockout that a failed _second_ factor also counts towards, alongside the per-IP
+  auth rate limiter — the two cover different attacks.
+- Password reset through a single-use, hashed, short-lived token delivered over a port. The
+  request step answers identically for a known address, an unknown one and a suspended account.
+- Backend-enforced RBAC: permissions re-read from the database on every request, tenant scope
+  derived from the user rather than the token, and denials audited.
+- Account administration (`/users`, `/roles`) with separation of duties: nobody edits their
+  own roles, nobody grants above their own rank, nobody suspends themselves, and the last
+  active Super Administrator cannot be removed.
+- Web client: sign-in including both MFA paths, forced password change, reset, session list,
+  route guards, and an accounts screen — with the access token held in memory and renewed
+  silently through the httpOnly refresh cookie.
+
+**Test coverage:** 225 backend integration tests, 122 backend unit tests, 44 frontend tests,
+all green in CI.
+
+**Deferred with a reason:** reset links are not yet emailed — no notification channel exists
+until Phase 6, so `PasswordResetDelivery` logs in development and reports loudly elsewhere.
+Editing a role&#39;s permissions at runtime (`role.manage`) has a permission but no endpoint;
+changing the matrix for everyone holding a role deserves its own design.
 
 ## ⬜ Phase 3 — Student and academic management
 

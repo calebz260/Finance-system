@@ -24,6 +24,8 @@ import {
   isApiErrorResponse,
 } from '@sfs/shared';
 
+import { getAccessToken, refreshAccessToken } from './auth-token';
+
 const DEFAULT_TIMEOUT_MS = 20_000;
 
 function resolveBaseUrl(): string {
@@ -91,6 +93,12 @@ export interface RequestOptions {
   /** Required for payment initiation so a retry cannot create a second transaction. */
   readonly idempotencyKey?: string;
   readonly headers?: Readonly<Record<string, string>>;
+  /**
+   * Skip the bearer token and the refresh-and-retry behaviour. Set on the sign-in and
+   * refresh calls themselves, which carry their own credential and must never recurse
+   * into a renewal.
+   */
+  readonly anonymous?: boolean;
 }
 
 function buildUrl(path: string, query: RequestOptions['query']): string {
@@ -127,10 +135,13 @@ function fallbackMessage(status: number): string {
 }
 
 /**
- * Core request routine: returns the whole response envelope.
- * Throws `ApiError` for every failure mode, so callers only ever handle one error type.
+ * One attempt at a request. Returns the whole response envelope and throws `ApiError`
+ * for every failure mode, so callers only ever handle one error type.
+ *
+ * Wrapped by `requestEnvelope`, which adds the refresh-and-retry behaviour. Keeping
+ * them apart is what stops a renewal recursing into another renewal.
  */
-async function requestEnvelope<TEnvelope extends object>(
+async function performRequest<TEnvelope extends object>(
   path: string,
   options: RequestOptions = {},
 ): Promise<TEnvelope> {
@@ -151,6 +162,13 @@ async function requestEnvelope<TEnvelope extends object>(
     Accept: 'application/json',
     ...options.headers,
   };
+  // The access token travels in the header, never in a cookie: a header is not
+  // attached automatically by the browser, so it cannot be ridden by a cross-site
+  // request the way an ambient cookie can.
+  const accessToken = options.anonymous === true ? null : getAccessToken();
+  if (accessToken !== null && headers.Authorization === undefined) {
+    headers.Authorization = `Bearer ${accessToken}`;
+  }
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (options.idempotencyKey !== undefined) {
     headers[IDEMPOTENCY_KEY_HEADER] = options.idempotencyKey;
@@ -234,6 +252,45 @@ async function requestEnvelope<TEnvelope extends object>(
   }
 
   return payload as TEnvelope;
+}
+
+/**
+ * True when a failure is worth one silent renewal attempt.
+ *
+ * Only an expired token qualifies. A 401 carrying `TOKEN_INVALID` means the session
+ * was revoked — by a sign-out elsewhere, a password change, or reuse detection — and
+ * retrying it would turn a deliberate revocation into a loop.
+ */
+function shouldAttemptRefresh(error: unknown, options: RequestOptions): boolean {
+  if (options.anonymous === true) return false;
+  if (!(error instanceof ApiError)) return false;
+  return error.status === 401 && error.code === ErrorCode.TOKEN_EXPIRED;
+}
+
+/**
+ * Perform a request, renewing an expired access token once and retrying.
+ *
+ * The renewal is invisible to the caller by design: a bursar halfway through recording
+ * a payment should not be bounced to the sign-in screen because fifteen minutes
+ * elapsed. A genuinely ended session still surfaces as a 401, which the auth provider
+ * turns into a sign-out.
+ */
+async function requestEnvelope<TEnvelope extends object>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<TEnvelope> {
+  try {
+    return await performRequest<TEnvelope>(path, options);
+  } catch (error) {
+    if (!shouldAttemptRefresh(error, options)) throw error;
+
+    const renewed = await refreshAccessToken();
+    // No renewal available means there is no live session; the original error is the
+    // honest one to report.
+    if (renewed === null) throw error;
+
+    return performRequest<TEnvelope>(path, options);
+  }
 }
 
 /**

@@ -24,6 +24,19 @@ const sharedEnv = {
   LOG_PRETTY: 'false',
   CORS_ORIGINS: 'http://localhost:5173,http://localhost:4173',
   APP_VERSION: '0.1.0-test',
+
+  // `JWT_ACCESS_SECRET` and `MFA_ENCRYPTION_KEY` have no defaults anywhere -- a default
+  // signing key is a forgeable session -- so importing anything that reads the config
+  // fails without them. These two are fixed, obviously-fake test fixtures rather than
+  // generated values, so a failure is reproducible and a token minted in one test run
+  // can be compared against another. They are not secrets and must never be deployed.
+  JWT_ACCESS_SECRET: 'test-only-access-token-secret-0123456789abcdef',
+  // 32 bytes of 0x74 ('t'), base64. The length is what AES-256-GCM requires.
+  MFA_ENCRYPTION_KEY: 'dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHQ=',
+  // Short lifetimes keep expiry-path tests fast without faking timers.
+  MFA_CHALLENGE_TTL_MINUTES: '5',
+  MAX_FAILED_LOGIN_ATTEMPTS: '5',
+  ACCOUNT_LOCK_MINUTES: '15',
 };
 
 export default defineConfig({

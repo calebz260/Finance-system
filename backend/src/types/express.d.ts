@@ -5,6 +5,7 @@
  * passed through services, not smuggled on the request object.
  */
 import type { ParsedRequestData } from '../middleware/validate.js';
+import type { Principal } from '../modules/auth/principal.js';
 
 declare global {
   namespace Express {
@@ -13,6 +14,12 @@ declare global {
       requestId: string;
       /** Output of `validate(...)`: parsed and coerced body/query/params. */
       valid?: ParsedRequestData;
+      /**
+       * The authenticated caller, set by the `authenticate` middleware. Optional because
+       * public routes have none; read it through `requirePrincipal(req)`, which turns a
+       * missing middleware into an immediate error rather than a silent undefined.
+       */
+      principal?: Principal;
     }
   }
 }

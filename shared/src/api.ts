@@ -4,6 +4,7 @@
  * Both sides import these types, so a response shape cannot drift between the server
  * that produces it and the screen that renders it without a compile error.
  */
+import type { PermissionKey, RoleKey } from './authorization.js';
 
 /** Machine-readable error codes. The frontend branches on these, never on message text. */
 export const ErrorCode = {
@@ -141,6 +142,183 @@ export function buildPaginationMeta(args: {
 }
 
 export type SortDirection = 'asc' | 'desc';
+
+/* --------------------------------------------------------------- authentication */
+
+/**
+ * The caller's identity and the grants in force for this request.
+ *
+ * `permissions` is sent so the web client can decide what to render. It is never an
+ * authorisation input: the backend re-reads permissions from the database on every
+ * request and decides there (Section 26).
+ */
+export interface AuthenticatedUser {
+  readonly id: string;
+  readonly email: string;
+  readonly firstName: string;
+  readonly lastName: string;
+  /** Null only for a Super Administrator, whose access is not scoped to one school. */
+  readonly schoolId: string | null;
+  readonly isSystemAdministrator: boolean;
+  readonly mustChangePassword: boolean;
+  readonly mfaEnabled: boolean;
+  /** Whether the current session completed an MFA challenge. */
+  readonly mfaSatisfied: boolean;
+  readonly roleKeys: readonly RoleKey[];
+  readonly permissions: readonly PermissionKey[];
+}
+
+/**
+ * An established session.
+ *
+ * Carries the access token only. The refresh token is set as an httpOnly cookie scoped
+ * to the auth routes, so it is never readable by JavaScript and is not attached to
+ * ordinary API calls.
+ */
+export interface SessionPayload {
+  readonly accessToken: string;
+  readonly expiresInSeconds: number;
+  readonly user: AuthenticatedUser;
+}
+
+/**
+ * What `POST /auth/login` returns. A correct password is not necessarily a session:
+ * for a role that requires MFA it is the first of two steps, which is why this is a
+ * discriminated union rather than an optional-field shape.
+ */
+export type LoginResult =
+  | ({ readonly status: 'authenticated' } & SessionPayload)
+  | {
+      readonly status: 'mfa_required';
+      /** Present this with a code at `POST /auth/mfa/verify`. Not an access token. */
+      readonly challengeToken: string;
+      readonly expiresInSeconds: number;
+    }
+  | {
+      readonly status: 'mfa_enrolment_required';
+      /** The role held requires MFA and the account has not enrolled yet. */
+      readonly enrolmentToken: string;
+      readonly expiresInSeconds: number;
+    };
+
+/** The details an authenticator app needs, returned once when enrolment starts. */
+export interface MfaEnrolmentStartPayload {
+  /** Base32, for manual entry when a QR code cannot be scanned. */
+  readonly secret: string;
+  /** `otpauth://` URI, usually rendered as a QR code. Contains the secret. */
+  readonly otpauthUri: string;
+}
+
+/**
+ * The result of confirming enrolment. Recovery codes are shown once and never
+ * retrievable again -- only their hashes are stored.
+ */
+export interface MfaEnrolmentCompletedPayload {
+  readonly recoveryCodes: readonly string[];
+  /** Present when enrolment completed a sign-in, so a session now exists. */
+  readonly session?: SessionPayload;
+  /**
+   * True when enrolling ended the caller's existing sessions, because a session that
+   * never satisfied MFA cannot be upgraded in place.
+   */
+  readonly reauthenticationRequired: boolean;
+}
+
+export interface RecoveryCodesPayload {
+  readonly recoveryCodes: readonly string[];
+}
+
+/* ------------------------------------------------------- user administration */
+
+/**
+ * Account lifecycle, mirroring the `user_status` enum in the database.
+ *
+ * Restated here rather than imported because `shared` must not depend on the generated
+ * Prisma client. Drift is caught at compile time: the backend assigns the database enum
+ * into this union when projecting a row, so adding a value on one side and not the other
+ * fails the build.
+ */
+export type UserAccountStatus = 'INVITED' | 'ACTIVE' | 'SUSPENDED' | 'LOCKED' | 'DISABLED';
+
+export interface UserRoleAssignment {
+  readonly roleKey: RoleKey;
+  readonly roleName: string;
+  readonly rank: number;
+  readonly requiresMfa: boolean;
+  /** ISO-8601 UTC. */
+  readonly assignedAt: string;
+}
+
+/**
+ * A user account as an administration screen sees it.
+ *
+ * Contains no credential material: no password hash, no MFA secret, no tokens. What it
+ * does carry is the security state an administrator needs in order to act — whether the
+ * account is locked, whether MFA is enrolled, when it was last used.
+ */
+export interface UserAccount {
+  readonly id: string;
+  readonly email: string;
+  readonly firstName: string;
+  readonly lastName: string;
+  readonly phone: string | null;
+  /** Null only for a Super Administrator. */
+  readonly schoolId: string | null;
+  readonly status: UserAccountStatus;
+  readonly isSystemAdministrator: boolean;
+  readonly mustChangePassword: boolean;
+  readonly mfaEnabled: boolean;
+  /** ISO-8601 UTC, or null when MFA has never been enrolled. */
+  readonly mfaEnrolledAt: string | null;
+  /** True while a brute-force lockout is in force. Derived from `lockedUntil`. */
+  readonly locked: boolean;
+  /** ISO-8601 UTC. */
+  readonly lockedUntil: string | null;
+  readonly failedLoginAttempts: number;
+  readonly lastLoginAt: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  /** Pass back on an update; a stale value is rejected with `RECORD_MODIFIED`. */
+  readonly version: number;
+  readonly roles: readonly UserRoleAssignment[];
+}
+
+/**
+ * The result of creating an account.
+ *
+ * `temporaryPassword` is present only when the server generated one, and only in this
+ * one response — it is never stored in plaintext and never retrievable again. Until a
+ * notification channel exists (Phase 6), handing it to the administrator who created the
+ * account is how it reaches its owner.
+ */
+export interface CreatedUserAccount {
+  readonly user: UserAccount;
+  readonly temporaryPassword?: string;
+}
+
+/** A role and what it may do, for the administration screens. */
+export interface RoleCatalogueEntry {
+  readonly key: RoleKey;
+  readonly name: string;
+  readonly description: string | null;
+  readonly rank: number;
+  readonly requiresMfa: boolean;
+  readonly permissions: readonly PermissionKey[];
+}
+
+/** One of the caller's live sessions, for a "where am I signed in?" screen. */
+export interface SessionSummary {
+  readonly id: string;
+  /** True for the session making this request. */
+  readonly current: boolean;
+  readonly ipAddress: string | null;
+  readonly userAgent: string | null;
+  readonly mfaSatisfied: boolean;
+  /** ISO-8601 UTC. */
+  readonly createdAt: string;
+  readonly lastSeenAt: string;
+  readonly expiresAt: string;
+}
 
 /* ----------------------------------------------------------------- health check */
 

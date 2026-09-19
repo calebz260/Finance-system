@@ -316,6 +316,26 @@ model User {
   /// True for the Super Administrator, whose access is not scoped to a single school.
   isSystemAdministrator Boolean @default(false) @map("is_system_administrator")
 
+  /// --- multi-factor authentication (Section 6)
+  /// Whether TOTP is active. A check constraint enforces that an enabled account has a
+  /// secret, so "MFA on, no secret" -- which would lock the user out -- cannot exist.
+  mfaEnabled Boolean @default(false) @map("mfa_enabled")
+  /// AES-256-GCM ciphertext, never the raw secret (see `src/lib/crypto.ts`).
+  mfaSecretEncrypted String? @map("mfa_secret_encrypted")
+  /// Secret issued during enrolment, held here until a first valid code confirms it, so
+  /// an abandoned enrolment cannot leave the account half-configured.
+  mfaPendingSecretEncrypted String?   @map("mfa_pending_secret_encrypted")
+  mfaEnrolledAt             DateTime? @map("mfa_enrolled_at") @db.Timestamptz(3)
+  /// Highest TOTP step counter already accepted. Blocks replay of an observed code.
+  mfaLastUsedCounter        Int?      @map("mfa_last_used_counter")
+
+  /// --- sign-in security (Section 25)
+  failedLoginAttempts Int       @default(0) @map("failed_login_attempts")
+  /// Set when the account is locked after repeated failures; cleared on success.
+  lockedUntil         DateTime? @map("locked_until") @db.Timestamptz(3)
+  lastLoginAt         DateTime? @map("last_login_at") @db.Timestamptz(3)
+  lastLoginIp         String?   @map("last_login_ip")
+
   createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
   /// Deactivation is a status, not a deletion. Present only for accounts that must be
@@ -328,10 +348,127 @@ model User {
   rolesAssigned    UserRole[] @relation("UserRoleAssigner")
   guardianProfile  Guardian?
   auditLogs        AuditLog[]
+  sessions         Session[]
+  recoveryCodes    MfaRecoveryCode[]
+  passwordResets   PasswordResetToken[]
 
   @@index([schoolId])
   @@index([schoolId, status])
   @@map("users")
+}
+
+/// ------------------------------------------------------------------- sessions
+
+/// One sign-in. Sessions are held server-side rather than being implied by a
+/// self-contained token, because this system needs revocation to be *immediate*:
+/// suspending a bursar or removing a role must take effect on their next request, not
+/// whenever an access token happens to expire.
+///
+/// The access token is a short-lived JWT that names this session; every authenticated
+/// request re-reads the session, the account status and the current permissions.
+model Session {
+  id     String  @id @default(uuid()) @db.Uuid
+  userId String  @map("user_id") @db.Uuid
+  /// The school the session is scoped to, copied at sign-in. Null for a Super
+  /// Administrator's cross-school session.
+  schoolId String? @map("school_id") @db.Uuid
+
+  /// Whether the MFA challenge was completed. A session that never satisfied MFA cannot
+  /// be upgraded later without signing in again.
+  mfaSatisfied Boolean @default(false) @map("mfa_satisfied")
+
+  ipAddress String? @map("ip_address")
+  userAgent String? @map("user_agent")
+
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastSeenAt DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(3)
+  /// Absolute end of the session, regardless of activity.
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
+  /// Why it ended: `logout`, `logout_all`, `token_reuse_detected`, `password_changed`,
+  /// `account_suspended`, `roles_changed`. Recorded because "why am I signed out?" is a
+  /// real support question, and because token reuse is a security event.
+  revokedReason String? @map("revoked_reason")
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokens RefreshToken[]
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+/// A refresh token in a session's rotation chain.
+///
+/// Each refresh consumes one token and issues the next, so a chain accumulates. That is
+/// what makes theft detectable: if a token that has already been used is presented
+/// again, either the legitimate client replayed it or an attacker stole it, and there is
+/// no way to tell which -- so the whole session is revoked. Silently issuing a new token
+/// would let a thief ride along indefinitely.
+///
+/// Only the SHA-256 hash is stored; the token itself exists solely in the client cookie.
+model RefreshToken {
+  id        String @id @default(uuid()) @db.Uuid
+  sessionId String @map("session_id") @db.Uuid
+  tokenHash String @unique @map("token_hash")
+
+  issuedAt  DateTime  @default(now()) @map("issued_at") @db.Timestamptz(3)
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(3)
+  /// When this token was exchanged. A second presentation after this is set is a reuse.
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(3)
+  /// The token issued in its place, so the chain can be walked during an investigation.
+  replacedById String? @unique @map("replaced_by_id") @db.Uuid
+
+  session    Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  replacedBy RefreshToken? @relation("TokenRotation", fields: [replacedById], references: [id], onDelete: SetNull)
+  replaces   RefreshToken? @relation("TokenRotation")
+
+  @@index([sessionId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+/// Single-use codes that let someone with MFA enabled sign in after losing their phone.
+///
+/// Stored as SHA-256 hashes: the codes are 100 bits of generated randomness, so there is
+/// no dictionary to attack and a slow KDF would add latency without adding security.
+/// Used codes are kept, with `usedAt` set, so "was a recovery code used?" is answerable
+/// during an incident.
+model MfaRecoveryCode {
+  id       String    @id @default(uuid()) @db.Uuid
+  userId   String    @map("user_id") @db.Uuid
+  codeHash String    @unique @map("code_hash")
+  usedAt   DateTime? @map("used_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, usedAt])
+  @@map("mfa_recovery_codes")
+}
+
+/// A password-reset grant.
+///
+/// Single-use and short-lived. Stored as a hash, so a database reader cannot mint a
+/// reset; and `usedAt` is recorded rather than the row being deleted, so a reset that
+/// was already consumed is distinguishable from one that never existed.
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(3)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(3)
+  /// Where the request came from, for abuse investigation.
+  requestedIp String? @map("requested_ip")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
 }
 
 /// A named set of permissions. Roles are a system catalogue shared by all schools; what

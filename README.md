@@ -8,8 +8,9 @@ audit.
 Its purpose is to replace the school's manual fee-slip verification process, so the
 manual/offline payment path is a first-class workflow rather than an exception path.
 
-> **Build status: Phase 0 (Project Foundation) complete.** The domain modules land in
-> Phases 1–15 — see [docs/ROADMAP.md](docs/ROADMAP.md) for exactly what exists today and
+> **Build status: Phases 0–2 complete** — project foundation, the core domain schema, and
+> authentication and authorisation. Fees, payments, receipts and reporting land in
+> Phases 3–15 — see [docs/ROADMAP.md](docs/ROADMAP.md) for exactly what exists today and
 > what does not. Nothing in this repository pretends to be finished before it is.
 
 ---
@@ -31,14 +32,30 @@ npm run db:up
 # 4. Generate the Prisma client and apply migrations
 npm run db:migrate --workspace @sfs/backend
 
-# 5. Run the API (http://localhost:4000) and the web client (http://localhost:5173)
+# 5. Seed the role catalogue and a realistic school
+npm run db:seed --workspace @sfs/backend
+
+# 6. Run the API (http://localhost:4000) and the web client (http://localhost:5173)
 npm run dev --workspace @sfs/backend
 npm run dev --workspace @sfs/frontend
 ```
 
-Then open <http://localhost:5173>. The System Status page reads live data from
-`GET /api/v1/health`, which probes the real database — it is the end-to-end proof that the
-whole chain is connected.
+Then open <http://localhost:5173> and sign in with a seeded account — `npm run db:seed` prints
+the list and the shared development password. Every seeded account must replace that password
+on first sign-in.
+
+Two things to expect on a first run. `JWT_ACCESS_SECRET` and `MFA_ENCRYPTION_KEY` have **no
+defaults** — the template ships deliberately invalid values, so the API refuses to start until
+you generate real ones (the commands are in `backend/.env.example`). And the seeded Bursar,
+Finance Manager, School Administrator and Super Administrator accounts require two-factor
+authentication: signing in as one walks you through enrolment with an authenticator app, which
+is the intended behaviour rather than a misconfiguration. A Parent or Student account signs in
+with a password alone.
+
+Until Phase 6 adds a notification channel, a password-reset link is not emailed. In
+development the token is written to the API log; in any other environment the attempt is
+logged as an error and nothing is sent. See
+[ADR-013](docs/DECISIONS.md#adr-013-a-password-reset-link-goes-through-a-delivery-port-never-into-a-response-or-a-log).
 
 > **Port note:** the PostgreSQL container publishes **5544**, because developer machines
 > commonly already run something on 5432. Override with `POSTGRES_PORT` in your shell or a

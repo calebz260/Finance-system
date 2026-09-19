@@ -633,7 +633,7 @@ export function describeSeedAccounts(): string {
   const password = process.env.SEED_PASSWORD ?? DEFAULT_SEED_PASSWORD;
   const rows = USERS.map((user) => {
     const role = getRoleDefinition(user.roleKey);
-    const mfa = role.requiresMfa ? ' (MFA required from Phase 2)' : '';
+    const mfa = role.requiresMfa ? ' (two-factor authentication required)' : '';
     return `  ${user.email.padEnd(38)} ${role.name}${mfa}`;
   });
   return [

@@ -8,16 +8,19 @@
 import { Router } from 'express';
 
 import type { CreateAppOptions } from '../app.js';
+import { createAuthRouter } from '../modules/auth/auth.routes.js';
 import { createHealthRouter } from '../modules/health/health.routes.js';
+import { createRoleRouter, createUserRouter } from '../modules/users/user.routes.js';
 
 export function createApiV1Router(options: CreateAppOptions = {}): Router {
   const router = Router();
 
   router.use('/health', createHealthRouter(options.databaseProbe));
+  router.use('/auth', createAuthRouter());
+  router.use('/users', createUserRouter());
+  router.use('/roles', createRoleRouter());
 
   // Mounted in later phases:
-  //   /auth            Phase 2
-  //   /users, /roles   Phase 2
   //   /students, /parents, /classes, /programs, /academic-years, /terms   Phase 3
   //   /fees            Phase 4
   //   /payments, /reconciliation                                          Phase 5

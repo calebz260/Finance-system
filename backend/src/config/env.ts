@@ -83,6 +83,70 @@ const envSchema = z
 
     /** Seconds to let in-flight requests finish during a graceful shutdown. */
     SHUTDOWN_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(120).default(15),
+
+    /* --------------------------------------------------- authentication (Phase 2) */
+
+    /**
+     * Signing key for access tokens. Deliberately has no default in any environment: a
+     * default signing key is a forgeable session, and a value that exists in the repo
+     * eventually reaches production. 32 bytes is the minimum for HS256 to carry its
+     * nominal strength.
+     */
+    JWT_ACCESS_SECRET: z
+      .string()
+      .min(32, 'JWT_ACCESS_SECRET must be at least 32 characters (use a random value)'),
+
+    /**
+     * Short-lived on purpose. A revoked session is rejected on the next request anyway
+     * (the session is checked against the database), so this bounds how long a *stolen*
+     * token is usable, not how long a revocation takes to apply.
+     */
+    ACCESS_TOKEN_TTL_MINUTES: z.coerce.number().int().min(1).max(120).default(15),
+
+    /** Sliding session length. Rotated on every refresh. */
+    REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().min(1).max(90).default(30),
+
+    /**
+     * AES-256-GCM key protecting TOTP secrets at rest, as 32 bytes in base64. A stolen
+     * database dump must not hand over the ability to generate valid MFA codes.
+     */
+    MFA_ENCRYPTION_KEY: z
+      .string()
+      .min(1, 'MFA_ENCRYPTION_KEY is required')
+      .refine((value) => {
+        try {
+          return Buffer.from(value, 'base64').length === 32;
+        } catch {
+          return false;
+        }
+      }, 'MFA_ENCRYPTION_KEY must be exactly 32 bytes encoded as base64'),
+
+    /** Label shown beside the code in the user's authenticator app. */
+    MFA_ISSUER: z.string().min(1).default('School Finance System'),
+
+    /** Consecutive failures before an account is locked. */
+    MAX_FAILED_LOGIN_ATTEMPTS: z.coerce.number().int().min(3).max(20).default(5),
+
+    /** How long a locked account stays locked. */
+    ACCOUNT_LOCK_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
+
+    /** Validity of a password-reset link. Short, because it is emailed. */
+    PASSWORD_RESET_TTL_MINUTES: z.coerce.number().int().min(5).max(1440).default(60),
+
+    /**
+     * Validity of the intermediate token issued between a correct password and a
+     * completed MFA challenge. Long enough to open an authenticator app, no longer.
+     */
+    MFA_CHALLENGE_TTL_MINUTES: z.coerce.number().int().min(1).max(30).default(5),
+
+    /**
+     * Cookie attributes for the refresh token. `Secure` is forced on in production;
+     * `SameSite` is configurable because the API and the web client may be served from
+     * different hosts, where `Strict` would drop the cookie.
+     */
+    REFRESH_COOKIE_NAME: z.string().min(1).default('sfs_refresh'),
+    REFRESH_COOKIE_SAMESITE: z.enum(['strict', 'lax', 'none']).default('strict'),
+    REFRESH_COOKIE_DOMAIN: z.string().optional(),
   })
   .superRefine((value, ctx) => {
     if (value.NODE_ENV === 'production') {
@@ -101,6 +165,19 @@ const envSchema = z
           code: 'custom',
           path: ['CORS_ORIGINS'],
           message: `Non-HTTPS origin "${insecureOrigin}" is not allowed in production`,
+        });
+      }
+
+      // `SameSite=None` sends the refresh cookie on every cross-site request, so it is
+      // only defensible with CSRF protection in place. Rejected here rather than left as
+      // a footgun someone discovers after a session-riding incident.
+      if (value.REFRESH_COOKIE_SAMESITE === 'none') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['REFRESH_COOKIE_SAMESITE'],
+          message:
+            'SameSite=None is not allowed in production. Serve the web client and the API ' +
+            'from the same site, or add CSRF protection before relaxing this.',
         });
       }
     }
@@ -136,6 +213,26 @@ export interface AppConfig {
     readonly rateLimit: {
       readonly windowMs: number;
       readonly max: number;
+    };
+  };
+  readonly auth: {
+    readonly accessTokenSecret: string;
+    readonly accessTokenTtlSeconds: number;
+    readonly refreshTokenTtlSeconds: number;
+    readonly mfaChallengeTtlSeconds: number;
+    readonly passwordResetTtlSeconds: number;
+    readonly maxFailedLoginAttempts: number;
+    readonly accountLockMs: number;
+    readonly mfaIssuer: string;
+    /** Decoded 32-byte AES-256-GCM key for TOTP secrets at rest. */
+    readonly mfaEncryptionKey: Buffer;
+    readonly refreshCookie: {
+      readonly name: string;
+      readonly sameSite: 'strict' | 'lax' | 'none';
+      readonly secure: boolean;
+      readonly domain?: string;
+      /** Scoped to the refresh route, so it is not sent with ordinary API calls. */
+      readonly path: string;
     };
   };
 }
@@ -199,6 +296,28 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
       rateLimit: Object.freeze({
         windowMs: env.RATE_LIMIT_WINDOW_MS,
         max: env.RATE_LIMIT_MAX_REQUESTS,
+      }),
+    }),
+    auth: Object.freeze({
+      accessTokenSecret: env.JWT_ACCESS_SECRET,
+      accessTokenTtlSeconds: env.ACCESS_TOKEN_TTL_MINUTES * 60,
+      refreshTokenTtlSeconds: env.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60,
+      mfaChallengeTtlSeconds: env.MFA_CHALLENGE_TTL_MINUTES * 60,
+      passwordResetTtlSeconds: env.PASSWORD_RESET_TTL_MINUTES * 60,
+      maxFailedLoginAttempts: env.MAX_FAILED_LOGIN_ATTEMPTS,
+      accountLockMs: env.ACCOUNT_LOCK_MINUTES * 60 * 1000,
+      mfaIssuer: env.MFA_ISSUER,
+      mfaEncryptionKey: Buffer.from(env.MFA_ENCRYPTION_KEY, 'base64'),
+      refreshCookie: Object.freeze({
+        name: env.REFRESH_COOKIE_NAME,
+        sameSite: env.REFRESH_COOKIE_SAMESITE,
+        // Never negotiable in production: a refresh token sent over plain HTTP is a
+        // session handed to anyone on the network path.
+        secure: env.NODE_ENV === 'production',
+        ...(env.REFRESH_COOKIE_DOMAIN !== undefined ? { domain: env.REFRESH_COOKIE_DOMAIN } : {}),
+        // Narrow path: the browser then sends the refresh token only to the endpoints
+        // that consume it, not alongside every ordinary API request.
+        path: '/api/v1/auth',
       }),
     }),
   });

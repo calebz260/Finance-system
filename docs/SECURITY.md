@@ -4,7 +4,7 @@ This system holds the personal and financial data of minors and moves real money
 document records what is enforced **today** and what each later phase adds — so the gap
 between the two is always visible rather than assumed closed.
 
-## In place now (Phase 0)
+## In place now (Phases 0–2)
 
 ### Transport and headers
 
@@ -63,21 +63,79 @@ between the two is always visible rather than assumed closed.
   security-relevant bug, not just a correctness one.
 - CI gates merges on lint, typecheck and the full test suite.
 
+### Authentication (Phase 2)
+
+- **Argon2id** password hashing at the OWASP parameters, with the cost recorded in the hash so
+  raising it later does not lock anyone out; hashes below the current policy are upgraded on
+  the owner&#39;s next sign-in.
+- **A password policy applied where a password is set, never where one is presented.** A length
+  floor, a common-password blocklist, and a refusal of anything built from the account&#39;s own
+  name, email or the school&#39;s. Deliberately no composition rules: they push people towards
+  `Password1!`, which is among the first guesses any attacker makes.
+- **An unknown email and a wrong password are indistinguishable** — same code, same message,
+  and the unknown-user path verifies against a decoy hash so the response time does not reveal
+  which it was. The same applies to a password-reset request.
+- **Per-account lockout that a failed second factor also counts towards.** Six digits is a
+  million guesses; without this, MFA would be the one credential an attacker could try without
+  limit. The counter lives in the database, so a restart does not clear it, and it is cleared
+  only on a _completed_ sign-in — not merely on a correct password.
+- **TOTP MFA, mandatory for Bursar, Finance Manager, School Administrator and Super
+  Administrator.** A correct password for such a role yields an intermediate token with a
+  different audience, which the authentication middleware rejects, so there is no session until
+  the second factor is proved. An account holding such a role that has never enrolled is routed
+  into enrolment rather than admitted on one factor.
+- **MFA secrets are AES-256-GCM encrypted at rest** under a key held outside the database, and
+  the accepted step counter is stored so an observed code cannot be replayed within its window.
+- **Recovery codes** are single-use, 100 bits of entropy, stored only as SHA-256 hashes, and
+  their use is audited.
+
+### Sessions (Phase 2)
+
+- **Sessions are server-side, not implied by a self-contained token.** Every authenticated
+  request re-reads the session, the account status and the current permissions, so suspending an
+  account or revoking a role takes effect on the next request rather than at token expiry.
+- **The access token is short-lived and travels in a header**, held in browser memory — never in
+  `localStorage`, where an injected script could read it. It carries no permissions.
+- **The refresh token is opaque, stored only as a hash, and lives in an httpOnly cookie** scoped
+  to `/api/v1/auth`, so JavaScript cannot read it and it is not attached to ordinary API calls.
+  `SameSite=None` is rejected outright in production.
+- **Refresh tokens rotate, and reuse collapses the session.** A consumed token presented again
+  is either a client replay or a theft, and the request cannot tell which — so the session is
+  revoked and the event is audited, turning a silent compromise into a visible one.
+- A password change ends every _other_ session; a password reset, a suspension and an MFA
+  change end them all.
+
+### Authorisation (Phase 2)
+
+- **Every decision is made on the backend from permissions loaded out of the database for that
+  request.** Nothing the client sends contributes: not a role in a header, not a claim in the
+  token. The web client uses the same permission list only to decide what to render.
+- **Tenant scope is derived from the user, not from the token**, so a tampered or merely stale
+  claim cannot widen access. A record in another school reads as `404`, because `403` would
+  confirm the id exists.
+- **Separation of duties on account administration**: nobody edits the roles on their own
+  account, nobody grants a role above their own rank, nobody changes their own account status,
+  and the last active Super Administrator cannot be removed. The self-assignment rule is the
+  load-bearing one — ranks order privilege but do not nest permissions, so a School
+  Administrator (rank 80) granting themselves Finance Manager (rank 70) would be a genuine
+  escalation.
+- **Role changes require a second factor**, whatever the role.
+- **Denials are audited.** One `403` is usually a misconfigured account; a pattern of them is
+  someone probing, and that distinction only exists if the attempts are recorded.
+
 ## Arriving in later phases
 
-| Control                                                                                            | Phase    |
-| -------------------------------------------------------------------------------------------------- | -------- |
-| Argon2id password hashing, password policy, brute-force lockout, password reset                    | 2        |
-| TOTP MFA for Bursar, Finance Manager, School Administrator, Super Administrator                    | 2        |
-| Backend-enforced RBAC; `school_id` scope enforced in repositories                                  | 2        |
-| Audit logging of login, financial operations, role and configuration changes                       | 2 onward |
-| Object-level authorisation (a parent may read only their own children's records)                   | 3        |
-| Idempotency keys, webhook signature verification, replay protection, duplicate-payment constraints | 5        |
-| File-upload validation, storage outside any web-servable path, malware scanning                    | 5        |
-| Separation of duties on manual payment verification                                                | 5        |
-| Insert-only, optionally hash-chained audit logs                                                    | 11       |
-| Rwanda Law N° 058/2021 data-protection review; retention policy per record type                    | 11       |
-| Restore-tested backups, monitoring, error tracking, secret rotation                                | 14       |
+| Control                                                                                                         | Phase    |
+| --------------------------------------------------------------------------------------------------------------- | -------- |
+| Audit logging of financial operations and configuration changes (login, roles and account changes are in place) | 2 onward |
+| Emailed password-reset links (the token, the expiry and the single-use rule already exist)                      | 6        |
+| Object-level authorisation (a parent may read only their own children's records)                                | 3        |
+| Idempotency keys, webhook signature verification, replay protection, duplicate-payment constraints              | 5        |
+| File-upload validation, storage outside any web-servable path, malware scanning                                 | 5        |
+| Separation of duties on manual payment verification                                                             | 5        |
+| Insert-only, optionally hash-chained audit logs                                                                 | 11       |
+| Rwanda Law N° 058/2021 data-protection review; retention policy per record type                                 | 11       |
+| Restore-tested backups, monitoring, error tracking, secret rotation                                             | 14       |
 
 ## Threats explicitly designed against
 

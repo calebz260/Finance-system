@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
 
 import { App } from './App';
+import { AuthProvider } from './auth/AuthProvider';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import './index.css';
 
@@ -15,7 +16,10 @@ createRoot(container).render(
   <StrictMode>
     <ErrorBoundary>
       <BrowserRouter>
-        <App />
+        {/* Inside the router: the provider redirects through it when a session ends. */}
+        <AuthProvider>
+          <App />
+        </AuthProvider>
       </BrowserRouter>
     </ErrorBoundary>
   </StrictMode>,

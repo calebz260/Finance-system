@@ -164,3 +164,100 @@ is absent.
 while proving nothing. Running serially prevents suites from interleaving transactions and
 truncations against the same schema. The separate database means a test reset can never
 truncate development data.
+
+---
+
+## ADR-011: Sessions are server-side, and refresh tokens rotate with reuse detection
+
+**Status:** accepted (Phase 2)
+
+An access token is a short-lived JWT that names a **session row**. Every authenticated request
+re-reads that row, the account status and the current permissions. The refresh token is not a
+JWT at all: it is 256 bits of opaque randomness, stored only as a SHA-256 hash, rotated on every
+use, and a token presented after it has been consumed revokes the entire session.
+
+**Why.** A self-contained token is only revocable by waiting for it to expire. In a system where
+a role decides who can write off a fee or verify a payment, "your suspension takes effect within
+fifteen minutes" is not an acceptable answer. Re-reading the session costs one indexed query and
+buys immediate revocation, authoritative permissions, and a smaller token.
+
+Reuse detection is the strict choice on purpose. When a consumed refresh token reappears, the
+request cannot distinguish a client retry from a theft — so the session collapses. The
+alternative, quietly issuing a new token, lets a thief ride along indefinitely: they refresh, the
+victim refreshes, and both keep working. Collapsing turns a silent compromise into a visible one
+plus an audit entry.
+
+**Cost.** A database read per request, and an occasional unexplained sign-out for a user whose
+client genuinely double-submitted a refresh. The client collapses concurrent renewals onto one
+request precisely to keep that rare.
+
+**Verified by** `backend/tests/integration/auth-session.test.ts` and
+`frontend/src/lib/api-client.auth.test.ts`.
+
+---
+
+## ADR-012: MFA is enforced by token audience, not by a flag
+
+**Status:** accepted (Phase 2)
+
+A correct password for a role that requires MFA yields an intermediate token whose JWT
+**audience** is `sfs:mfa-challenge`, not `sfs:access`. The authentication middleware only accepts
+the access audience. A session records whether it satisfied MFA, and that cannot be upgraded in
+place — enabling a second factor ends every existing session.
+
+**Why.** If step one of two-factor authentication returned something the API would accept, MFA
+would be advisory: anyone who noticed could skip step two. Separating the audiences makes "this
+credential is not a session" a property of the token rather than a check somebody has to
+remember to write. Requiring MFA is also evaluated against the roles held _now_, so granting
+someone the Bursar role does not leave them with a single-factor session.
+
+**Cost.** Three token kinds instead of one, and a user who enrols voluntarily is signed out at
+the end of enrolment rather than continuing seamlessly.
+
+**Verified by** `backend/tests/unit/token.service.test.ts` and the MFA sections of
+`backend/tests/integration/auth-login.test.ts`.
+
+---
+
+## ADR-013: A password-reset link goes through a delivery port, never into a response or a log
+
+**Status:** accepted (Phase 2)
+
+`PasswordResetDelivery` is an interface. Until Phase 6 supplies a notification channel, the
+adapter logs the link **in development only** and, in every other environment, logs an error
+recording that a reset was requested and nothing was sent.
+
+**Why.** The reset token is a credential for the account. Returning it to the caller of
+`POST /auth/password/reset-request` would let anyone reset anyone's password by asking; writing
+it to a production log would place a live credential in every log sink and backup downstream.
+Defining the seam now means the flow is complete and testable today — the token is minted,
+hashed, stored, expired and consumed exactly as it will be in production — and only the last hop
+changes later.
+
+**Cost.** Password reset is not self-service in production until Phase 6. Until then an
+administrator unlocks or reissues accounts, which is the status quo rather than a regression.
+
+**Verified by** `backend/tests/integration/auth-password.test.ts`, which swaps in a recording
+adapter.
+
+---
+
+## ADR-014: Nobody may change the roles on their own account
+
+**Status:** accepted (Phase 2)
+
+`user.assign_role` permits granting and revoking roles on _other_ accounts only, and never a role
+ranked above the caller's own.
+
+**Why.** The rank rule alone is not sufficient, and the gap is not obvious. Role ranks order
+privilege, but they do not nest permissions: a School Administrator (rank 80) does not hold
+`payment.reverse`, while a Finance Manager (rank 70) does. A rank-only rule would therefore let a
+School Administrator grant themselves the _lower_-ranked Finance Manager role and acquire a
+permission they were deliberately not given. Refusing self-assignment outright means every grant
+is an act by a second person, which is the property the separation of duties actually depends on.
+
+**Cost.** A school with exactly one administrator cannot change its own roles and needs the
+Super Administrator. That is the correct trade: a single account able to grant itself anything is
+not an administrator, it is a superuser.
+
+**Verified by** the role-assignment cases in `backend/tests/integration/authorization.test.ts`.

@@ -54,6 +54,29 @@ through the `pg` driver adapter in `backend/src/lib/prisma.ts`.
 | `JSON_BODY_LIMIT`         | no       | `256kb`                 | Maximum JSON body. File uploads get their own limits when they arrive in Phase 5.                                                                                                                                                                                                                    |
 | `TRUST_PROXY_HOPS`        | no       | `0`                     | Number of reverse proxies in front of the API. **Set this correctly in production.** An explicit hop count is used instead of `trust proxy: true`, because trusting any `X-Forwarded-For` would let a client forge its IP and evade rate limiting — and would corrupt the IP recorded in audit logs. |
 
+### Authentication
+
+No defaults are provided for the two secrets, in any environment. A default signing key is a
+forgeable session, and a value committed to a repository eventually reaches production — so
+the API refuses to start without them rather than starting insecurely.
+
+| Variable                     | Required | Default                 | Notes                                                                                                                                                                                                                               |
+| ---------------------------- | -------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `JWT_ACCESS_SECRET`          | **yes**  | —                       | At least 32 characters of randomness. Signs access and intermediate tokens. Generate: `node -e "console.log(require(&#39;node:crypto&#39;).randomBytes(48).toString(&#39;base64url&#39;))"`                                         |
+| `MFA_ENCRYPTION_KEY`         | **yes**  | —                       | Exactly 32 bytes, base64-encoded: the AES-256-GCM key protecting TOTP secrets at rest. **If it is lost or changed, every enrolled authenticator stops verifying and those users must re-enrol.** Treat it like a database password. |
+| `ACCESS_TOKEN_TTL_MINUTES`   | no       | `15`                    | Bounds how long a _stolen_ access token is usable. Revocation itself is immediate, because every request re-reads the session.                                                                                                      |
+| `REFRESH_TOKEN_TTL_DAYS`     | no       | `30`                    | Absolute session lifetime. Refreshing renews activity, never this ceiling.                                                                                                                                                          |
+| `MFA_CHALLENGE_TTL_MINUTES`  | no       | `5`                     | Validity of the intermediate token between a correct password and a completed second factor. Long enough to open an authenticator app, no longer.                                                                                   |
+| `MFA_ISSUER`                 | no       | `School Finance System` | The label shown beside the code in the user&#39;s authenticator app.                                                                                                                                                                |
+| `MAX_FAILED_LOGIN_ATTEMPTS`  | no       | `5`                     | Consecutive failures before lockout. A failed second factor counts towards the same threshold.                                                                                                                                      |
+| `ACCOUNT_LOCK_MINUTES`       | no       | `15`                    | How long a locked account stays locked. An administrator can clear it sooner.                                                                                                                                                       |
+| `PASSWORD_RESET_TTL_MINUTES` | no       | `60`                    | Validity of a reset link. Short, because it travels over a channel the school does not control.                                                                                                                                     |
+| `REFRESH_COOKIE_NAME`        | no       | `sfs_refresh`           | Cookie holding the refresh token. Always httpOnly, and scoped to `/api/v1/auth`.                                                                                                                                                    |
+| `REFRESH_COOKIE_SAMESITE`    | no       | `strict`                | `strict`                                                                                                                                                                                                                            | `lax` | `none`. **`none` is rejected in production**: it sends the cookie on every cross-site request, which is only defensible with CSRF protection in place. |
+| `REFRESH_COOKIE_DOMAIN`      | no       | —                       | Only needed when the API and the web client sit on different subdomains.                                                                                                                                                            |
+
+`Secure` is forced on for the refresh cookie in production regardless of configuration.
+
 ### Local infrastructure (docker-compose)
 
 | Variable            | Default                  | Notes                                                                                                                                                                         |
@@ -80,9 +103,6 @@ These are listed so the deployment story is not a surprise later. They are not r
 
 | Variable                                  | Phase | Purpose                                                                            |
 | ----------------------------------------- | ----- | ---------------------------------------------------------------------------------- |
-| `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` | 2     | Token signing. Distinct, long, random, rotated.                                    |
-| `ACCESS_TOKEN_TTL`, `REFRESH_TOKEN_TTL`   | 2     | Session lifetimes.                                                                 |
-| `MFA_ISSUER`                              | 2     | TOTP issuer label shown in authenticator apps.                                     |
 | `PAYMENT_PROVIDER_*`                      | 5     | Per-adapter credentials and webhook signing secrets.                               |
 | `UPLOAD_STORAGE_PATH`, `UPLOAD_MAX_BYTES` | 5     | Proof-of-payment and bank statement uploads, stored outside any web-servable path. |
 | `SMS_PROVIDER_*`, `SMTP_*`                | 6     | Notification channels.                                                             |

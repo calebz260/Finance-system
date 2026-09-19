@@ -43,6 +43,21 @@ Rules that keep the layering real rather than decorative:
 Health is the first module and deliberately follows the full pattern even though it is
 trivial, so the shape is established before the complicated modules arrive.
 
+### Where authentication sits
+
+`authenticate` runs before any protected route and establishes `req.principal`: the caller&#39;s
+identity, the permissions in force **right now**, and the tenant scope. It is loaded from the
+database on every request rather than read out of the token, which is what makes a suspension
+or a revoked role take effect immediately instead of at token expiry. `requirePermission`,
+`requireRole`, `requireMfaSatisfied` and `requireUsablePassword` then decide, and a denial is
+audited.
+
+The auth module keeps the standard anatomy with two additions: `token.service.ts` and
+`session.service.ts` are services in the ordinary sense, while `principal.ts` is the one place
+a database row becomes the request&#39;s notion of "who is calling". `password-delivery.ts` is a
+port, for the same reason `DatabaseProbe` is: the channel that will carry a reset link does
+not exist until Phase 6, and the flow should not have to be rewritten when it does.
+
 ### Ports and adapters where it earns its keep
 
 `HealthService` depends on a `DatabaseProbe` interface, not on Prisma. That is what lets the
@@ -67,7 +82,8 @@ request
   │
   ├─ /healthz, /readyz      unversioned infrastructure probes
   ├─ /api/v1/...            versioned application API
-  │     └─ validate(schemas) → controller → service → repository → PostgreSQL
+  │     └─ authenticate → requirePermission → validate(schemas)
+  │          → controller → service → repository → PostgreSQL
   │
   ├─ notFoundHandler        404 in the standard error envelope
   └─ errorHandler           the single place an error becomes a response
@@ -171,6 +187,12 @@ here carry student ids and filter values.
   blank page, and never renders the error text, which can contain props holding student data.
 - `lib/format.ts` — the only place timestamps are converted from stored UTC to Africa/Kigali,
   and the only place money strings are formatted. It formats; it never recomputes.
+- `auth/AuthProvider.tsx` with `lib/auth-token.ts` — the session. The access token is held in
+  memory, never in web storage, and is renewed silently through the httpOnly refresh cookie
+  when a request comes back expired. Concurrent renewals collapse onto one request, because
+  presenting a consumed refresh token twice is what the server treats as theft.
+- `components/auth/RequireAuth.tsx` — the route guard. It decides what to _render_; the server
+  decides what is allowed, and re-reads permissions from the database to do it.
 
 ## Configuration
 
@@ -186,9 +208,10 @@ layer through shared helpers rather than trusted to callers (Section 5 of the sp
 The column and the scoping layer cost almost nothing now and are expensive to retrofit once
 real financial data exists. See [DECISIONS.md](DECISIONS.md#adr-002-multi-school-from-day-one).
 
-## What Phase 0 deliberately does not include
+## What is not built yet
 
-Authentication, authorisation, the domain schema, payments and reporting all arrive in later
-phases. The foundation they need — typed config, error hierarchy, request context, audit-ready
-logging, validation middleware, money handling, the test harness and CI — is in place, so
-none of them requires rebuilding it. See [ROADMAP.md](ROADMAP.md).
+Payments, fees, reporting, receipts, clearance and promotion all arrive in later phases. The
+foundation they need — typed config, error hierarchy, request context, audit-ready logging,
+validation middleware, money handling, the domain schema, authentication, backend-enforced
+authorisation, the test harness and CI — is in place, so none of them requires rebuilding it.
+See [ROADMAP.md](ROADMAP.md).

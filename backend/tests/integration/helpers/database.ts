@@ -13,6 +13,13 @@ import { prisma } from '../../../src/lib/prisma.js';
 
 const DOMAIN_TABLES = [
   'audit_logs',
+  // Authentication state. `CASCADE` from `users` would reach these anyway, but listing
+  // them keeps the reset explicit rather than relying on the direction of a foreign key
+  // that a later migration could change.
+  'password_reset_tokens',
+  'mfa_recovery_codes',
+  'refresh_tokens',
+  'sessions',
   'enrollments',
   'student_guardians',
   'guardians',

@@ -31,13 +31,16 @@ const HASH_OPTIONS = {
 } as const;
 
 /** Rejected outright, so a truncation bug cannot yield a trivially crackable hash. */
-const MIN_PASSWORD_LENGTH = 12;
+export const MIN_PASSWORD_LENGTH = 12;
 
 /**
  * Argon2 accepts arbitrarily long input, but hashing a megabyte of text is a cheap way
  * for a caller to burn server CPU, so the length is capped.
+ *
+ * Exported alongside the minimum so request schemas can bound an incoming password at
+ * the edge, before it reaches a hash call, without restating the numbers.
  */
-const MAX_PASSWORD_LENGTH = 256;
+export const MAX_PASSWORD_LENGTH = 256;
 
 export class PasswordPolicyError extends Error {
   constructor(message: string) {
@@ -56,6 +59,119 @@ export function assertPasswordLength(password: string): void {
     throw new PasswordPolicyError(
       `Password must be at most ${String(MAX_PASSWORD_LENGTH)} characters long.`,
     );
+  }
+}
+
+/* --------------------------------------------------------------- password policy */
+
+/**
+ * Passwords seen constantly in credential-stuffing lists, plus the ones this particular
+ * deployment invites: a school in Rwanda will otherwise collect a pile of accounts using
+ * the school's own name.
+ *
+ * A short embedded list rather than a downloaded corpus. It catches the genuinely common
+ * choices at no operational cost; Phase 11 can add a breach-corpus check if the review
+ * calls for one. Compared after the same normalisation the check applies to the
+ * candidate, so `Password123!` and `password123!` are both caught.
+ */
+const FORBIDDEN_PASSWORDS: readonly string[] = [
+  'password',
+  'password1',
+  'password123',
+  'passw0rd',
+  'qwerty',
+  'qwerty123',
+  'letmein',
+  'welcome',
+  'welcome1',
+  'admin',
+  'administrator',
+  'iloveyou',
+  'abc123',
+  'abcd1234',
+  '123456',
+  '1234567',
+  '12345678',
+  '123456789',
+  '1234567890',
+  'changeme',
+  'secret',
+  'school',
+  'schoolfees',
+  'bursar',
+  'finance',
+  'rwanda',
+  'kigali',
+];
+
+/** Lower-cased, with separators removed, so cosmetic variation does not defeat a check. */
+function normaliseForComparison(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * Identity fragments a password must not be built from: the email local part, the email
+ * domain's first label, and each name. Short fragments are dropped — refusing every
+ * password containing a two-letter surname would reject sound passwords for no gain.
+ */
+function identityFragments(identity: PasswordIdentity): string[] {
+  const fragments: string[] = [];
+  const [localPart, domain] = identity.email.split('@');
+  if (localPart !== undefined) fragments.push(localPart);
+  const domainLabel = domain?.split('.')[0];
+  if (domainLabel !== undefined) fragments.push(domainLabel);
+  if (identity.firstName !== undefined) fragments.push(identity.firstName);
+  if (identity.lastName !== undefined) fragments.push(identity.lastName);
+
+  return fragments.map(normaliseForComparison).filter((fragment) => fragment.length >= 4);
+}
+
+export interface PasswordIdentity {
+  readonly email: string;
+  readonly firstName?: string;
+  readonly lastName?: string;
+}
+
+/**
+ * The password policy applied wherever a password is *set*: creation, change and reset.
+ *
+ * Deliberately NIST SP 800-63B-shaped rather than the familiar
+ * "uppercase-lowercase-digit-symbol" rule. Composition rules push people towards
+ * `Password1!` — which satisfies every class and is among the first guesses any attacker
+ * makes — while a length floor plus a blocklist raises the cost of the guesses that
+ * actually get made. Length is what buys strength here; Argon2id covers the rest.
+ *
+ * Three refusals, each for a distinct attack:
+ *
+ *  - **Too short** — brute force. Twelve characters is the floor.
+ *  - **A known-common password** — credential stuffing, which tries these first.
+ *  - **Built from the account's own identity** — targeted guessing by someone who knows
+ *    the user, which in a school is everyone.
+ *
+ * Never applied when a password is *presented* at sign-in: see `auth.schema.ts`.
+ */
+export function assertPasswordAcceptable(password: string, identity: PasswordIdentity): void {
+  assertPasswordLength(password);
+
+  const normalised = normaliseForComparison(password);
+
+  if (FORBIDDEN_PASSWORDS.includes(normalised)) {
+    throw new PasswordPolicyError(
+      'That password is one of the most commonly used and is too easy to guess. Choose something else.',
+    );
+  }
+
+  for (const fragment of identityFragments(identity)) {
+    if (normalised.includes(fragment)) {
+      throw new PasswordPolicyError(
+        'Your password must not contain your name, email address or the school name.',
+      );
+    }
+  }
+
+  // A single repeated character satisfies any length floor while carrying no entropy.
+  if (/^(.)\1*$/.test(password)) {
+    throw new PasswordPolicyError('Your password must not be a single repeated character.');
   }
 }
 
