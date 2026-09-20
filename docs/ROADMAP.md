@@ -119,11 +119,45 @@ upload storage, its path rules and malware scanning belong to Phase 5, which own
 handling, and this feature deliberately does not pre-empt that design. Promotion itself is
 Phase 9; the level chain it walks is in place and tested here.
 
-## ⬜ Phase 4 — Fee management
+## ✅ Phase 4 — Fee management
 
 Fee structures scoped by **academic year + term + level/class + programme**, fee items,
 student charges, discounts, scholarships, waivers and authorised adjustments, all with reason,
 actor, timestamp and audit trail. Historical fee structures preserved, never overwritten.
+
+**Delivered:**
+
+- A **financial ledger** as the single source of every balance. Charges, discounts, scholarship
+  awards, waivers and adjustments are business records; none of them is summed to produce a
+  balance. Each posts to `financial_entries` when it takes effect, and a balance is
+  `SUM(DEBIT) − SUM(CREDIT)` and nothing else — which makes double-counting structurally
+  impossible rather than a rule to remember (ADR-022).
+- The ledger is **insert-only**. A voided charge or reversed relief posts an opposing entry
+  linked to the original, so an account reads as a sequence of facts rather than a row that has
+  been edited. There is no balance column anywhere to drift.
+- Fee categories and fee structures, with applicability as a **filter rather than a hierarchy**:
+  a structure matches when every field it names matches the student's own enrolment, including
+  residency — the reason a day student is never charged for a bed. Two structures that would
+  charge one category twice abort the run before anything is written (ADR-019).
+- Charge generation with preview-then-apply, idempotent across re-runs by a duplicate key on the
+  fee-structure line, which branches for termly and annual fees and exempts ad-hoc charges
+  (ADR-020). A run applies in one transaction.
+- A structure that has raised charges is **locked**; archiving withdraws it without touching the
+  charges it raised, so a historical charge stays explainable after the price list changes.
+- Discounts, scholarships (a named programme plus per-student, per-period awards), waivers and
+  authorised adjustments, sharing one approval workflow: a Bursar requests, only a Finance
+  Manager approves, and nobody approves their own request. Nothing reaches the ledger until
+  approved; a percentage is taken against what a charge still carries, not its face value.
+- Web client: fee setup, the charge-run screen with a mandatory preview, and a student financial
+  account showing the balance, the charges, the relief and the ledger line by line.
+
+**Test coverage:** 551 backend tests (54 new fee integration cases, 29 new balance unit cases)
+and 60 frontend tests. The full local verification gate passes against PostgreSQL 17.
+
+**Deferred with a reason:** payments are Phase 5 and post nothing yet, so `totalPaid` is
+structurally present and always zero — the subtraction is in the formula and tested, so
+introducing payments is a new entry source rather than a change to how money is counted.
+Instalment schedules (OPEN-QUESTIONS #3) wait for the payment validation they exist to serve.
 
 ## ⬜ Phase 5 — Payment system (online and manual)
 

@@ -159,6 +159,111 @@ enum GuardianRelationship {
   @@map("guardian_relationship")
 }
 
+/// ------------------------------------------------------------------ fees (Phase 4)
+
+/// Lifecycle of a fee structure. A structure is a *template*; once it has raised
+/// charges it stops being editable, because a structure that can be rewritten after the
+/// fact makes every historical charge unexplainable (Section 12).
+enum FeeStructureStatus {
+  /// Being configured. Items may be added, changed and removed.
+  DRAFT
+  /// Published and usable for charge generation.
+  ACTIVE
+  /// Withdrawn from use. Never deleted: historical charges point at it.
+  ARCHIVED
+
+  @@map("fee_structure_status")
+}
+
+/// A charge's lifecycle, deliberately *not* its financial state.
+///
+/// Whether a charge is settled is derived by the balance service from credits against
+/// it, never stored — a stored "paid" flag is the manually editable balance the whole
+/// design refuses (Section 13A).
+enum ChargeStatus {
+  /// A live obligation.
+  RAISED
+  /// Raised in error and withdrawn. Excluded from balances, retained for history.
+  VOID
+
+  @@map("charge_status")
+}
+
+/// Which way a ledger entry moves an account.
+///
+/// A charge debits, relief and payments credit. Direction is carried here rather than by
+/// the sign of `amount`, so every stored amount is positive and no call site has to
+/// remember a sign convention to read the ledger.
+enum EntryDirection {
+  DEBIT
+  CREDIT
+
+  @@map("entry_direction")
+}
+
+/// What kind of business record produced a ledger entry.
+///
+/// The ledger is the authoritative balance, but an entry on its own says only "credit
+/// 20,000". This names the record that justifies it, so a balance can always be traced
+/// back to the decision behind each line.
+enum FinancialEntrySource {
+  CHARGE
+  DISCOUNT
+  SCHOLARSHIP
+  WAIVER
+  ADJUSTMENT
+  /// Phase 5. Present so the ledger's set of sources is closed and a payment is a new
+  /// value rather than a new concept; nothing in Phase 4 writes one.
+  PAYMENT
+
+  @@map("financial_entry_source")
+}
+
+/// How a relief amount was arrived at. The resolved amount is always stored; the method
+/// is kept so a percentage award can be explained and re-checked years later.
+enum AdjustmentMethod {
+  FIXED
+  PERCENTAGE
+
+  @@map("adjustment_method")
+}
+
+/// Approval state, shared by every record that reduces or increases what a family owes.
+///
+/// A bursar may request; only a Finance Manager may approve (`adjustment.approve` in the
+/// role matrix). Nothing reaches the ledger until APPROVED.
+enum ApprovalStatus {
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  /// Withdrawn by the requester before a decision was made.
+  CANCELLED
+  /// Approved, then reversed. The original record is preserved and an opposing ledger
+  /// entry is posted, because deleting an approved decision would erase it.
+  REVERSED
+
+  @@map("approval_status")
+}
+
+/// Whether a student's financial account is open to new activity.
+enum FinancialAccountStatus {
+  ACTIVE
+  /// Closed after a student leaves. History stays readable; nothing new is posted.
+  CLOSED
+
+  @@map("financial_account_status")
+}
+
+/// Outcome of a bulk charge-generation run.
+enum ChargeRunStatus {
+  /// Validated and costed, nothing written.
+  PREVIEWED
+  /// Committed inside one transaction.
+  APPLIED
+
+  @@map("charge_run_status")
+}
+
 enum AuditResult {
   SUCCESS
   FAILURE
@@ -217,6 +322,18 @@ model School {
   enrollments    Enrollment[]
   auditLogs      AuditLog[]
   identifierSequences IdentifierSequence[]
+  feeCategories      FeeCategory[]
+  feeStructures      FeeStructure[]
+  feeStructureItems  FeeStructureItem[]
+  chargeRuns         ChargeRun[]
+  studentCharges     StudentCharge[]
+  discounts          Discount[]
+  scholarships       Scholarship[]
+  studentScholarships StudentScholarship[]
+  feeWaivers         FeeWaiver[]
+  financialAdjustments FinancialAdjustment[]
+  financialAccounts  StudentFinancialAccount[]
+  financialEntries   FinancialEntry[]
 
   @@map("schools")
 }
@@ -351,6 +468,25 @@ model User {
   sessions         Session[]
   recoveryCodes    MfaRecoveryCode[]
   passwordResets   PasswordResetToken[]
+
+  // Financial actions are attributed to a person, never to "the system" (Section 27).
+  chargeRunsExecuted   ChargeRun[]     @relation("ChargeRunExecutor")
+  chargesRaised        StudentCharge[] @relation("ChargeRaiser")
+  chargesVoided        StudentCharge[] @relation("ChargeVoider")
+
+  discountsRequested    Discount[]            @relation("DiscountRequester")
+  discountsDecided      Discount[]            @relation("DiscountApprover")
+  discountsReversed     Discount[]            @relation("DiscountReverser")
+  scholarshipsRequested StudentScholarship[]  @relation("ScholarshipRequester")
+  scholarshipsDecided   StudentScholarship[]  @relation("ScholarshipApprover")
+  scholarshipsReversed  StudentScholarship[]  @relation("ScholarshipReverser")
+  waiversRequested      FeeWaiver[]           @relation("WaiverRequester")
+  waiversDecided        FeeWaiver[]           @relation("WaiverApprover")
+  waiversReversed       FeeWaiver[]           @relation("WaiverReverser")
+  adjustmentsRequested  FinancialAdjustment[] @relation("AdjustmentRequester")
+  adjustmentsDecided    FinancialAdjustment[] @relation("AdjustmentApprover")
+  adjustmentsReversed   FinancialAdjustment[] @relation("AdjustmentReverser")
+  entriesPosted         FinancialEntry[]      @relation("EntryPoster")
 
   @@index([schoolId])
   @@index([schoolId, status])
@@ -601,6 +737,7 @@ model Program {
   department  Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   levels      Level[]
   enrollments Enrollment[]
+  feeStructures FeeStructure[]
 
   @@unique([schoolId, code])
   @@index([schoolId, status])
@@ -631,6 +768,7 @@ model Level {
   previousLevel Level?         @relation("LevelProgression")
   classSections ClassSection[]
   enrollments   Enrollment[]
+  feeStructures FeeStructure[]
 
   @@unique([schoolId, programId, code])
   @@unique([schoolId, programId, sequence])
@@ -660,8 +798,9 @@ model ClassSection {
 
   school       School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
-  level        Level        @relation(fields: [levelId], references: [id], onDelete: Restrict)
-  enrollments  Enrollment[]
+  level         Level          @relation(fields: [levelId], references: [id], onDelete: Restrict)
+  enrollments   Enrollment[]
+  feeStructures FeeStructure[]
 
   @@unique([schoolId, academicYearId, levelId, code])
   @@index([schoolId, academicYearId])
@@ -690,6 +829,14 @@ model AcademicYear {
   terms         Term[]
   classSections ClassSection[]
   enrollments   Enrollment[]
+  feeStructures FeeStructure[]
+  chargeRuns    ChargeRun[]
+  charges       StudentCharge[]
+  discounts     Discount[]
+  scholarships  StudentScholarship[]
+  waivers       FeeWaiver[]
+  adjustments   FinancialAdjustment[]
+  financialEntries FinancialEntry[]
 
   @@unique([schoolId, name])
   @@index([schoolId, status])
@@ -718,8 +865,16 @@ model Term {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
   version   Int      @default(0)
 
-  school       School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  school        School          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  academicYear  AcademicYear    @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  feeStructures FeeStructure[]
+  chargeRuns    ChargeRun[]
+  charges       StudentCharge[]
+  discounts     Discount[]
+  scholarships  StudentScholarship[]
+  waivers       FeeWaiver[]
+  adjustments   FinancialAdjustment[]
+  financialEntries FinancialEntry[]
 
   @@unique([schoolId, academicYearId, sequence])
   @@unique([schoolId, academicYearId, name])
@@ -770,6 +925,13 @@ model Student {
   school     School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   guardians  StudentGuardian[]
   enrollments Enrollment[]
+  charges     StudentCharge[]
+  discounts   Discount[]
+  scholarships StudentScholarship[]
+  waivers     FeeWaiver[]
+  adjustments FinancialAdjustment[]
+  financialAccount StudentFinancialAccount?
+  financialEntries FinancialEntry[]
 
   @@unique([schoolId, studentId])
   @@index([schoolId, status])
@@ -882,6 +1044,7 @@ model Enrollment {
   program      Program       @relation(fields: [programId], references: [id], onDelete: Restrict)
   level        Level         @relation(fields: [levelId], references: [id], onDelete: Restrict)
   classSection ClassSection? @relation(fields: [classSectionId], references: [id], onDelete: SetNull)
+  charges      StudentCharge[]
 
   // A partial unique index in the constraints migration allows only one ENROLLED row per
   // student per year, while still permitting a withdrawal followed by a re-admission.
@@ -890,6 +1053,574 @@ model Enrollment {
   @@index([schoolId, academicYearId, levelId])
   @@index([schoolId, academicYearId, classSectionId])
   @@map("enrollments")
+}
+
+/// -------------------------------------------------------------- fees and charges
+
+/// A kind of fee the school levies: Tuition, Boarding, Examination, Transport.
+///
+/// Configurable rather than an enum, because the list differs between schools and
+/// changes without wanting a release. Categories are deactivated, never deleted: a
+/// charge raised three years ago still names one (Section 12).
+model FeeCategory {
+  id          String  @id @default(uuid()) @db.Uuid
+  schoolId    String  @map("school_id") @db.Uuid
+  /// Short stable code, e.g. "TUITION". Used in imports and reports.
+  code        String
+  name        String
+  description String?
+  isActive    Boolean @default(true) @map("is_active")
+  sortOrder   Int     @default(0) @map("sort_order")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(0)
+
+  school School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  items  FeeStructureItem[]
+  charges StudentCharge[]
+
+  @@unique([schoolId, code])
+  @@index([schoolId, isActive])
+  @@map("fee_categories")
+}
+
+/// What the school charges, and to whom.
+///
+/// A structure is a *rule*, never an obligation. It carries the applicability filter —
+/// year, optionally term, and optionally programme, level, class and residency — and its
+/// items carry the amounts. A student matches when every field the structure specifies
+/// matches their enrolment; a field left null means "does not narrow". Matching is
+/// therefore additive and has no precedence rules to misread: two matching structures
+/// both contribute, and generation refuses outright if they would charge the same
+/// category twice (ADR-019).
+///
+/// `termId` is nullable. A null term is a once-per-year fee such as registration; a
+/// named term is the ordinary per-term fee. The duplicate-charge key branches on this,
+/// which is why two partial unique indexes exist rather than one.
+model FeeStructure {
+  id             String  @id @default(uuid()) @db.Uuid
+  schoolId       String  @map("school_id") @db.Uuid
+  name           String
+  description    String?
+  academicYearId String  @map("academic_year_id") @db.Uuid
+  /// Null means the structure is charged once for the whole academic year.
+  termId         String? @map("term_id") @db.Uuid
+
+  /// --- applicability. Every null widens the match.
+  programId      String?        @map("program_id") @db.Uuid
+  levelId        String?        @map("level_id") @db.Uuid
+  classSectionId String?        @map("class_section_id") @db.Uuid
+  /// Restricts to boarders or to day students. Null applies to both — the reason
+  /// `Enrollment.residency` exists.
+  residency      ResidencyType? @map("residency")
+
+  status FeeStructureStatus @default(DRAFT)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(0)
+
+  school       School        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  academicYear AcademicYear  @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  term         Term?         @relation(fields: [termId], references: [id], onDelete: Restrict)
+  program      Program?      @relation(fields: [programId], references: [id], onDelete: Restrict)
+  level        Level?        @relation(fields: [levelId], references: [id], onDelete: Restrict)
+  classSection ClassSection? @relation(fields: [classSectionId], references: [id], onDelete: Restrict)
+
+  items   FeeStructureItem[]
+  charges StudentCharge[]
+  runs    ChargeRun[]
+
+  @@index([schoolId, academicYearId, status])
+  @@index([schoolId, termId])
+  @@index([schoolId, levelId])
+  @@map("fee_structures")
+}
+
+/// One line of a fee structure: a category and an amount.
+///
+/// At most one line per category per structure, so a single structure cannot itself
+/// charge Tuition twice.
+model FeeStructureItem {
+  id             String  @id @default(uuid()) @db.Uuid
+  schoolId       String  @map("school_id") @db.Uuid
+  feeStructureId String  @map("fee_structure_id") @db.Uuid
+  feeCategoryId  String  @map("fee_category_id") @db.Uuid
+  /// What appears on the charge and later on the receipt. Copied onto each charge so
+  /// renaming the line afterwards cannot rewrite what a parent was told they owed.
+  label          String
+  amount         Decimal @db.Decimal(14, 2)
+  sortOrder      Int     @default(0) @map("sort_order")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  school       School          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  feeStructure FeeStructure    @relation(fields: [feeStructureId], references: [id], onDelete: Cascade)
+  feeCategory  FeeCategory     @relation(fields: [feeCategoryId], references: [id], onDelete: Restrict)
+  charges      StudentCharge[]
+
+  @@unique([feeStructureId, feeCategoryId])
+  @@index([schoolId])
+  @@map("fee_structure_items")
+}
+
+/// A bulk charge-generation run.
+///
+/// Kept as a row so a run is answerable after the fact: who ran it, over what scope, how
+/// many charges it created and how many it skipped as already present. Charges point
+/// back at it, which is what makes "why does this student have this charge?" a lookup
+/// rather than an inference.
+model ChargeRun {
+  id             String  @id @default(uuid()) @db.Uuid
+  schoolId       String  @map("school_id") @db.Uuid
+  academicYearId String  @map("academic_year_id") @db.Uuid
+  termId         String? @map("term_id") @db.Uuid
+  /// Null when the run covered every matching structure for the period.
+  feeStructureId String? @map("fee_structure_id") @db.Uuid
+
+  status ChargeRunStatus @default(PREVIEWED)
+
+  /// Counts as applied. A preview row is not persisted, so these describe real writes.
+  studentsMatched Int     @default(0) @map("students_matched")
+  chargesCreated  Int     @default(0) @map("charges_created")
+  chargesSkipped  Int     @default(0) @map("charges_skipped")
+  totalAmount     Decimal @default(0) @map("total_amount") @db.Decimal(14, 2)
+
+  executedByUserId String   @map("executed_by_user_id") @db.Uuid
+  executedAt       DateTime @default(now()) @map("executed_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  school       School        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  academicYear AcademicYear  @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  term         Term?         @relation(fields: [termId], references: [id], onDelete: Restrict)
+  feeStructure FeeStructure? @relation(fields: [feeStructureId], references: [id], onDelete: Restrict)
+  executedBy   User          @relation("ChargeRunExecutor", fields: [executedByUserId], references: [id], onDelete: Restrict)
+
+  charges StudentCharge[]
+
+  @@index([schoolId, academicYearId, termId])
+  @@map("charge_runs")
+}
+
+/// A student's actual financial obligation.
+///
+/// Distinct from the fee structure that produced it, and deliberately self-contained:
+/// `description` and `amount` are snapshots taken at the moment the charge was raised, so
+/// a later edit to the structure — or archiving it entirely — cannot change what a
+/// student was charged. `feeStructureItemId` is null for an ad-hoc charge, which is also
+/// what exempts ad-hoc charges from the duplicate key.
+model StudentCharge {
+  id           String @id @default(uuid()) @db.Uuid
+  schoolId     String @map("school_id") @db.Uuid
+  studentId    String @map("student_id") @db.Uuid
+  /// The enrolment the charge was raised against. Pins the charge to the student's
+  /// placement *at that time*, so a later promotion cannot rewrite its academic context.
+  enrollmentId String @map("enrollment_id") @db.Uuid
+
+  academicYearId String  @map("academic_year_id") @db.Uuid
+  /// Null for a once-per-year charge, mirroring the structure it came from.
+  termId         String? @map("term_id") @db.Uuid
+
+  feeCategoryId      String  @map("fee_category_id") @db.Uuid
+  feeStructureId     String? @map("fee_structure_id") @db.Uuid
+  feeStructureItemId String? @map("fee_structure_item_id") @db.Uuid
+  chargeRunId        String? @map("charge_run_id") @db.Uuid
+
+  /// Snapshot of the structure item's label, or the operator's description for an
+  /// ad-hoc charge.
+  description String
+  amount      Decimal      @db.Decimal(14, 2)
+  status      ChargeStatus @default(RAISED)
+  /// Why an ad-hoc charge was raised. Required by the service for ad-hoc charges.
+  notes       String?
+
+  raisedByUserId String   @map("raised_by_user_id") @db.Uuid
+  raisedAt       DateTime @default(now()) @map("raised_at") @db.Timestamptz(3)
+
+  voidedByUserId String?   @map("voided_by_user_id") @db.Uuid
+  voidedAt       DateTime? @map("voided_at") @db.Timestamptz(3)
+  voidReason     String?   @map("void_reason")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(0)
+
+  school           School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student          Student           @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  enrollment       Enrollment        @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
+  academicYear     AcademicYear      @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  term             Term?             @relation(fields: [termId], references: [id], onDelete: Restrict)
+  feeCategory      FeeCategory       @relation(fields: [feeCategoryId], references: [id], onDelete: Restrict)
+  feeStructure     FeeStructure?     @relation(fields: [feeStructureId], references: [id], onDelete: Restrict)
+  feeStructureItem FeeStructureItem? @relation(fields: [feeStructureItemId], references: [id], onDelete: Restrict)
+  chargeRun        ChargeRun?        @relation(fields: [chargeRunId], references: [id], onDelete: SetNull)
+  raisedBy         User              @relation("ChargeRaiser", fields: [raisedByUserId], references: [id], onDelete: Restrict)
+  voidedBy         User?             @relation("ChargeVoider", fields: [voidedByUserId], references: [id], onDelete: Restrict)
+
+  discounts   Discount[]
+  scholarships StudentScholarship[]
+  waivers     FeeWaiver[]
+  adjustments FinancialAdjustment[]
+  entries     FinancialEntry[]
+
+  // Duplicate protection lives in the constraints migration as two partial unique
+  // indexes, because the key branches on whether the charge is termly or annual and
+  // because voided charges must not block a correct re-raise.
+  @@index([schoolId, studentId, academicYearId])
+  @@index([schoolId, academicYearId, termId, status])
+  @@index([schoolId, feeCategoryId])
+  @@index([studentId, status])
+  @@map("student_charges")
+}
+
+/// ------------------------------------------------- relief and adjustment records
+
+/// A negotiated reduction: a staff-child rate, a sibling rate, an agreed settlement.
+///
+/// A *business record*, not a balance. It never modifies the charge it applies to, and
+/// it moves nothing until approved — approval posts a CREDIT `FinancialEntry`, and that
+/// entry is what the balance is computed from (ADR-022).
+model Discount {
+  id              String  @id @default(uuid()) @db.Uuid
+  schoolId        String  @map("school_id") @db.Uuid
+  studentId       String  @map("student_id") @db.Uuid
+  /// Null for a discount that applies across a period rather than to one charge.
+  studentChargeId String? @map("student_charge_id") @db.Uuid
+
+  academicYearId String  @map("academic_year_id") @db.Uuid
+  termId         String? @map("term_id") @db.Uuid
+
+  method     AdjustmentMethod @default(FIXED)
+  /// Set only for PERCENTAGE, so a rate can be explained and re-checked.
+  percentage Decimal?         @db.Decimal(5, 2)
+  /// The resolved amount, always positive. Frozen at request, re-checked at approval.
+  amount     Decimal          @db.Decimal(14, 2)
+
+  reason String
+  status ApprovalStatus @default(PENDING_APPROVAL)
+
+  requestedByUserId String   @map("requested_by_user_id") @db.Uuid
+  requestedAt       DateTime @default(now()) @map("requested_at") @db.Timestamptz(3)
+  decidedByUserId   String?  @map("decided_by_user_id") @db.Uuid
+  decidedAt         DateTime? @map("decided_at") @db.Timestamptz(3)
+  decisionNote      String?  @map("decision_note")
+  reversedByUserId  String?  @map("reversed_by_user_id") @db.Uuid
+  reversedAt        DateTime? @map("reversed_at") @db.Timestamptz(3)
+  reversalReason    String?  @map("reversal_reason")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(0)
+
+  school        School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student       Student        @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  studentCharge StudentCharge? @relation(fields: [studentChargeId], references: [id], onDelete: Restrict)
+  academicYear  AcademicYear   @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  term          Term?          @relation(fields: [termId], references: [id], onDelete: Restrict)
+  requestedBy   User           @relation("DiscountRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  decidedBy     User?          @relation("DiscountApprover", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+  reversedBy    User?          @relation("DiscountReverser", fields: [reversedByUserId], references: [id], onDelete: Restrict)
+
+  entries FinancialEntry[]
+
+  @@index([schoolId, studentId, status])
+  @@index([schoolId, academicYearId, termId, status])
+  @@index([studentChargeId])
+  @@map("discounts")
+}
+
+/// A named award programme: "Girls in STEM Bursary", "District Merit Scholarship".
+///
+/// The programme, not the money. It carries the terms on which awards are normally made;
+/// what an individual student actually receives is a `StudentScholarship`. Separating
+/// them is what lets a school answer "how much did this bursary cost us this year?"
+/// without reading every award's free text.
+model Scholarship {
+  id          String  @id @default(uuid()) @db.Uuid
+  schoolId    String  @map("school_id") @db.Uuid
+  code        String
+  name        String
+  description String?
+  /// Who funds it. Plain text: a sponsor is not a system entity.
+  sponsor     String?
+
+  /// Defaults offered when awarding. An award may differ, and stores its own figures.
+  defaultMethod     AdjustmentMethod @default(FIXED) @map("default_method")
+  defaultPercentage Decimal?         @map("default_percentage") @db.Decimal(5, 2)
+  defaultAmount     Decimal?         @map("default_amount") @db.Decimal(14, 2)
+
+  isActive Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(0)
+
+  school School               @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  awards StudentScholarship[]
+
+  @@unique([schoolId, code])
+  @@index([schoolId, isActive])
+  @@map("scholarships")
+}
+
+/// One student's award under a scholarship, for one academic period.
+///
+/// Per-period by design. A scholarship is not assumed to be permanent (Section 15): each
+/// year or term a student benefits is its own approved record, so withdrawing an award
+/// next year changes nothing about the year it did apply to, and nothing renews silently.
+model StudentScholarship {
+  id            String  @id @default(uuid()) @db.Uuid
+  schoolId      String  @map("school_id") @db.Uuid
+  scholarshipId String  @map("scholarship_id") @db.Uuid
+  studentId     String  @map("student_id") @db.Uuid
+  /// Null for an award covering a whole period rather than one charge.
+  studentChargeId String? @map("student_charge_id") @db.Uuid
+
+  academicYearId String  @map("academic_year_id") @db.Uuid
+  termId         String? @map("term_id") @db.Uuid
+
+  method     AdjustmentMethod @default(FIXED)
+  percentage Decimal?         @db.Decimal(5, 2)
+  amount     Decimal          @db.Decimal(14, 2)
+
+  reason String
+  status ApprovalStatus @default(PENDING_APPROVAL)
+
+  requestedByUserId String    @map("requested_by_user_id") @db.Uuid
+  requestedAt       DateTime  @default(now()) @map("requested_at") @db.Timestamptz(3)
+  decidedByUserId   String?   @map("decided_by_user_id") @db.Uuid
+  decidedAt         DateTime? @map("decided_at") @db.Timestamptz(3)
+  decisionNote      String?   @map("decision_note")
+  reversedByUserId  String?   @map("reversed_by_user_id") @db.Uuid
+  reversedAt        DateTime? @map("reversed_at") @db.Timestamptz(3)
+  reversalReason    String?   @map("reversal_reason")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(0)
+
+  school        School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  scholarship   Scholarship    @relation(fields: [scholarshipId], references: [id], onDelete: Restrict)
+  student       Student        @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  studentCharge StudentCharge? @relation(fields: [studentChargeId], references: [id], onDelete: Restrict)
+  academicYear  AcademicYear   @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  term          Term?          @relation(fields: [termId], references: [id], onDelete: Restrict)
+  requestedBy   User           @relation("ScholarshipRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  decidedBy     User?          @relation("ScholarshipApprover", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+  reversedBy    User?          @relation("ScholarshipReverser", fields: [reversedByUserId], references: [id], onDelete: Restrict)
+
+  entries FinancialEntry[]
+
+  @@index([schoolId, studentId, status])
+  @@index([schoolId, scholarshipId, academicYearId])
+  @@index([studentChargeId])
+  @@map("student_scholarships")
+}
+
+/// An authorised write-off: an amount the school has decided not to pursue.
+///
+/// Distinct from a discount (which is agreed before the fact), from a payment (no money
+/// arrived) and from a correction (the charge was right). Always fixed — a waiver is a
+/// decision about a specific sum, not a rate.
+model FeeWaiver {
+  id              String  @id @default(uuid()) @db.Uuid
+  schoolId        String  @map("school_id") @db.Uuid
+  studentId       String  @map("student_id") @db.Uuid
+  studentChargeId String? @map("student_charge_id") @db.Uuid
+
+  academicYearId String  @map("academic_year_id") @db.Uuid
+  termId         String? @map("term_id") @db.Uuid
+
+  amount Decimal @db.Decimal(14, 2)
+  reason String
+  status ApprovalStatus @default(PENDING_APPROVAL)
+
+  requestedByUserId String    @map("requested_by_user_id") @db.Uuid
+  requestedAt       DateTime  @default(now()) @map("requested_at") @db.Timestamptz(3)
+  decidedByUserId   String?   @map("decided_by_user_id") @db.Uuid
+  decidedAt         DateTime? @map("decided_at") @db.Timestamptz(3)
+  decisionNote      String?   @map("decision_note")
+  reversedByUserId  String?   @map("reversed_by_user_id") @db.Uuid
+  reversedAt        DateTime? @map("reversed_at") @db.Timestamptz(3)
+  reversalReason    String?   @map("reversal_reason")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(0)
+
+  school        School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student       Student        @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  studentCharge StudentCharge? @relation(fields: [studentChargeId], references: [id], onDelete: Restrict)
+  academicYear  AcademicYear   @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  term          Term?          @relation(fields: [termId], references: [id], onDelete: Restrict)
+  requestedBy   User           @relation("WaiverRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  decidedBy     User?          @relation("WaiverApprover", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+  reversedBy    User?          @relation("WaiverReverser", fields: [reversedByUserId], references: [id], onDelete: Restrict)
+
+  entries FinancialEntry[]
+
+  @@index([schoolId, studentId, status])
+  @@index([schoolId, academicYearId, termId, status])
+  @@index([studentChargeId])
+  @@map("fee_waivers")
+}
+
+/// An authorised administrative correction, in either direction.
+///
+/// This is how a mistake is fixed: the wrong figure is never edited, a correcting record
+/// is raised against it and, on approval, an opposing ledger entry is posted (Section
+/// 17). `direction` is explicit because a correction can legitimately go either way — an
+/// overcharge is credited back, a late fee is debited.
+model FinancialAdjustment {
+  id              String  @id @default(uuid()) @db.Uuid
+  schoolId        String  @map("school_id") @db.Uuid
+  studentId       String  @map("student_id") @db.Uuid
+  studentChargeId String? @map("student_charge_id") @db.Uuid
+
+  academicYearId String  @map("academic_year_id") @db.Uuid
+  termId         String? @map("term_id") @db.Uuid
+
+  direction EntryDirection
+  amount    Decimal        @db.Decimal(14, 2)
+
+  reason String
+  status ApprovalStatus @default(PENDING_APPROVAL)
+
+  requestedByUserId String    @map("requested_by_user_id") @db.Uuid
+  requestedAt       DateTime  @default(now()) @map("requested_at") @db.Timestamptz(3)
+  decidedByUserId   String?   @map("decided_by_user_id") @db.Uuid
+  decidedAt         DateTime? @map("decided_at") @db.Timestamptz(3)
+  decisionNote      String?   @map("decision_note")
+  reversedByUserId  String?   @map("reversed_by_user_id") @db.Uuid
+  reversedAt        DateTime? @map("reversed_at") @db.Timestamptz(3)
+  reversalReason    String?   @map("reversal_reason")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(0)
+
+  school        School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student       Student        @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  studentCharge StudentCharge? @relation(fields: [studentChargeId], references: [id], onDelete: Restrict)
+  academicYear  AcademicYear   @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  term          Term?          @relation(fields: [termId], references: [id], onDelete: Restrict)
+  requestedBy   User           @relation("AdjustmentRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  decidedBy     User?          @relation("AdjustmentApprover", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+  reversedBy    User?          @relation("AdjustmentReverser", fields: [reversedByUserId], references: [id], onDelete: Restrict)
+
+  entries FinancialEntry[]
+
+  @@index([schoolId, studentId, status])
+  @@index([schoolId, academicYearId, termId, status])
+  @@index([studentChargeId])
+  @@map("financial_adjustments")
+}
+
+/// ------------------------------------------------------- the financial ledger
+
+/// A student's financial account: the thing the ledger rolls up to.
+///
+/// Carries **no balance column**. A balance is the sum of this account's entries,
+/// computed on every read (ADR-021). There is deliberately nothing here for a bug, a
+/// bulk script or a well-meaning migration to set to the wrong number.
+///
+/// One per student, created on demand the first time anything financial happens to them.
+model StudentFinancialAccount {
+  id        String @id @default(uuid()) @db.Uuid
+  schoolId  String @map("school_id") @db.Uuid
+  studentId String @unique @map("student_id") @db.Uuid
+
+  /// ISO-4217, copied from school settings when the account opens. Held here so a
+  /// school changing currency later cannot silently reinterpret existing history.
+  currency String                 @default("RWF") @db.VarChar(3)
+  status   FinancialAccountStatus @default(ACTIVE)
+
+  openedAt  DateTime  @default(now()) @map("opened_at") @db.Timestamptz(3)
+  closedAt  DateTime? @map("closed_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version   Int       @default(0)
+
+  school  School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  entries FinancialEntry[]
+
+  @@index([schoolId, status])
+  @@map("student_financial_accounts")
+}
+
+/// The authoritative financial ledger. One row per movement, insert-only.
+///
+/// **This is what a balance is computed from.** Charges, discounts, scholarships, waivers
+/// and adjustments are business records that justify entries; none of them is summed to
+/// produce a balance, which is what makes double-counting structurally impossible rather
+/// than a rule someone has to remember (ADR-022).
+///
+///     balance = Σ DEBIT − Σ CREDIT
+///
+/// Insert-only in the strict sense: there is no status column and no update path. An
+/// entry that turns out to be wrong is not edited or deleted — an opposing entry is
+/// posted and linked through `reversalOfEntryId`, so the ledger records that something
+/// was undone as well as that it happened (Section 20). Phase 11 revokes UPDATE and
+/// DELETE on this table from the application role.
+///
+/// Phase 5 adds payments as `source = PAYMENT` CREDIT entries. Nothing about the balance
+/// formula changes when it does; that is the point of the shape.
+model FinancialEntry {
+  id        String @id @default(uuid()) @db.Uuid
+  schoolId  String @map("school_id") @db.Uuid
+  accountId String @map("account_id") @db.Uuid
+  /// Denormalised from the account so the common query — one student's ledger — does
+  /// not need a join, and so a per-student index is possible.
+  studentId String @map("student_id") @db.Uuid
+
+  academicYearId String  @map("academic_year_id") @db.Uuid
+  termId         String? @map("term_id") @db.Uuid
+
+  entryType EntryDirection       @map("entry_type")
+  /// Always positive. Direction is `entryType`, never the sign.
+  amount    Decimal              @db.Decimal(14, 2)
+  source    FinancialEntrySource
+
+  /// Exactly one of these is set, matching `source`. Enforced by a check constraint.
+  studentChargeId       String? @map("student_charge_id") @db.Uuid
+  discountId            String? @map("discount_id") @db.Uuid
+  studentScholarshipId  String? @map("student_scholarship_id") @db.Uuid
+  feeWaiverId           String? @map("fee_waiver_id") @db.Uuid
+  financialAdjustmentId String? @map("financial_adjustment_id") @db.Uuid
+
+  /// What this line says on a statement.
+  description String
+
+  /// Set when this entry undoes an earlier one. The earlier entry is left untouched.
+  reversalOfEntryId String? @unique @map("reversal_of_entry_id") @db.Uuid
+
+  postedByUserId String   @map("posted_by_user_id") @db.Uuid
+  postedAt       DateTime @default(now()) @map("posted_at") @db.Timestamptz(3)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  school              School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  account             StudentFinancialAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  student             Student                 @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  academicYear        AcademicYear            @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  term                Term?                   @relation(fields: [termId], references: [id], onDelete: Restrict)
+  studentCharge       StudentCharge?          @relation(fields: [studentChargeId], references: [id], onDelete: Restrict)
+  discount            Discount?               @relation(fields: [discountId], references: [id], onDelete: Restrict)
+  studentScholarship  StudentScholarship?     @relation(fields: [studentScholarshipId], references: [id], onDelete: Restrict)
+  feeWaiver           FeeWaiver?              @relation(fields: [feeWaiverId], references: [id], onDelete: Restrict)
+  financialAdjustment FinancialAdjustment?    @relation(fields: [financialAdjustmentId], references: [id], onDelete: Restrict)
+  postedBy            User                    @relation("EntryPoster", fields: [postedByUserId], references: [id], onDelete: Restrict)
+  reversalOf          FinancialEntry?         @relation("EntryReversal", fields: [reversalOfEntryId], references: [id], onDelete: Restrict)
+  reversedBy          FinancialEntry?         @relation("EntryReversal")
+
+  @@index([schoolId, studentId, academicYearId, termId])
+  @@index([accountId, postedAt])
+  @@index([schoolId, source, postedAt])
+  @@index([studentChargeId])
+  @@map("financial_entries")
 }
 
 /// ------------------------------------------------------------------- audit trail

@@ -79,6 +79,36 @@ export const AuditAction = {
   USER_UNLOCKED: 'user.unlocked',
   USER_ROLE_GRANTED: 'user.role.granted',
   USER_ROLE_REVOKED: 'user.role.revoked',
+
+  // --- fee configuration (Phase 4)
+  FEE_CATEGORY_CREATED: 'fee.category.created',
+  FEE_CATEGORY_UPDATED: 'fee.category.updated',
+  FEE_STRUCTURE_CREATED: 'fee.structure.created',
+  FEE_STRUCTURE_UPDATED: 'fee.structure.updated',
+  FEE_STRUCTURE_ACTIVATED: 'fee.structure.activated',
+  FEE_STRUCTURE_ARCHIVED: 'fee.structure.archived',
+  FEE_STRUCTURE_ITEM_ADDED: 'fee.structure.item_added',
+  FEE_STRUCTURE_ITEM_UPDATED: 'fee.structure.item_updated',
+  FEE_STRUCTURE_ITEM_REMOVED: 'fee.structure.item_removed',
+
+  // --- charges (Phase 4)
+  CHARGE_RAISED: 'charge.raised',
+  CHARGE_VOIDED: 'charge.voided',
+  CHARGE_RUN_APPLIED: 'charge.run.applied',
+
+  // --- relief: discounts, scholarship awards, waivers, adjustments (Phase 4)
+  //
+  // One set of actions across the four record types. The entity type says which table
+  // it was, and the `kind` in the state payload says it again in words, so a reviewer
+  // reading the log alone can tell a waiver from a discount.
+  RELIEF_REQUESTED: 'relief.requested',
+  RELIEF_APPROVED: 'relief.approved',
+  RELIEF_REJECTED: 'relief.rejected',
+  RELIEF_CANCELLED: 'relief.cancelled',
+  RELIEF_REVERSED: 'relief.reversed',
+
+  SCHOLARSHIP_CREATED: 'scholarship.created',
+  SCHOLARSHIP_UPDATED: 'scholarship.updated',
 } as const;
 
 export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];
@@ -99,6 +129,38 @@ export const AuditEntity = {
   CLASS_SECTION: 'ClassSection',
   DEPARTMENT: 'Department',
   STUDENT_GUARDIAN: 'StudentGuardian',
+  FEE_CATEGORY: 'FeeCategory',
+  FEE_STRUCTURE: 'FeeStructure',
+  FEE_STRUCTURE_ITEM: 'FeeStructureItem',
+  STUDENT_CHARGE: 'StudentCharge',
+  CHARGE_RUN: 'ChargeRun',
+  DISCOUNT: 'Discount',
+  SCHOLARSHIP: 'Scholarship',
+  STUDENT_SCHOLARSHIP: 'StudentScholarship',
+  FEE_WAIVER: 'FeeWaiver',
+  FINANCIAL_ADJUSTMENT: 'FinancialAdjustment',
+  FINANCIAL_ENTRY: 'FinancialEntry',
 } as const;
 
 export type AuditEntity = (typeof AuditEntity)[keyof typeof AuditEntity];
+
+/**
+ * The entity name for a relief record of a given kind.
+ *
+ * A function rather than four call sites choosing a constant, so the mapping from the
+ * kind a service is holding to the name written into the audit log exists once.
+ */
+export function reliefEntity(
+  kind: 'DISCOUNT' | 'SCHOLARSHIP' | 'WAIVER' | 'ADJUSTMENT',
+): AuditEntity {
+  switch (kind) {
+    case 'DISCOUNT':
+      return AuditEntity.DISCOUNT;
+    case 'SCHOLARSHIP':
+      return AuditEntity.STUDENT_SCHOLARSHIP;
+    case 'WAIVER':
+      return AuditEntity.FEE_WAIVER;
+    case 'ADJUSTMENT':
+      return AuditEntity.FINANCIAL_ADJUSTMENT;
+  }
+}

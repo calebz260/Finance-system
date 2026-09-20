@@ -27,6 +27,8 @@ const NAVIGATION: readonly NavigationItem[] = [
   { label: 'System status', to: '/' },
   { label: 'Students', to: '/students', permission: Permission.STUDENT_READ },
   { label: 'Academic setup', to: '/academic', permission: Permission.ACADEMIC_READ },
+  { label: 'Fee setup', to: '/fees', permission: Permission.FEE_STRUCTURE_READ },
+  { label: 'Raise charges', to: '/fees/charge-runs', permission: Permission.CHARGE_READ },
   { label: 'User accounts', to: '/users', permission: Permission.USER_READ },
   { label: 'Your account', to: '/account' },
 ];

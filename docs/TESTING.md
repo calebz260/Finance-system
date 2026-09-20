@@ -89,6 +89,21 @@ transaction, because the row count is itself a property worth asserting.
 **Phase 4** — fee calculation per term; discounts, scholarships and waivers; adjustment
 authorisation; historical fee structures preserved when a new period is created.
 
+The balance formula is tested as a **pure function over ledger rows**
+(`tests/unit/balance.test.ts`), without a database. That is deliberate: if the arithmetic is
+wrong then every screen, report and clearance decision built on it is wrong in the same way, and
+the error lands in the second decimal place where nobody notices until a parent does. Testing it
+in isolation means the boundary cases worth having — an overpayment, a reversal, 0.1 + 0.2, the
+largest storable amount, a percentage that does not divide evenly — can all be asserted in
+milliseconds instead of through HTTP.
+
+Everything that touches money is then asserted end to end against a real database
+(`tests/integration/fees.test.ts`): that re-running generation does not double-charge, that a
+day student is never charged for boarding, that relief never edits the charge it reduces, that a
+void posts an opposing entry rather than deleting a row, and that a Finance Manager cannot
+approve their own request. The assertion in most of those is the **balance**, not a row count —
+a double charge shows up there even when every individual record looks right.
+
 **Phase 5** — successful, failed, pending, cancelled, reversed and refunded payments; a
 duplicate webhook does not double-credit; an invalid signature is rejected; a mismatched
 amount or reference is rejected; replayed webhooks are rejected; idempotency keys prevent

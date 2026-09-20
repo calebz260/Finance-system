@@ -17,6 +17,15 @@ import {
   createTermRouter,
 } from '../modules/academic/academic.routes.js';
 import { createAuthRouter } from '../modules/auth/auth.routes.js';
+import {
+  createChargeRouter,
+  createChargeRunRouter,
+  createFeeCategoryRouter,
+  createFeeStructureRouter,
+  createReliefRouter,
+  createScholarshipRouter,
+  createStudentFinancialRouter,
+} from '../modules/fees/fee.routes.js';
 import { createHealthRouter } from '../modules/health/health.routes.js';
 import {
   createEnrollmentRouter,
@@ -44,13 +53,25 @@ export function createApiV1Router(options: CreateAppOptions = {}): Router {
   router.use('/class-sections', createClassSectionRouter());
 
   // Students, the people responsible for them, and where they are placed.
+  //
+  // The financial router mounts under the same prefix so a student's balance reads as
+  // `/students/:id/balance`. Declared before the student router: both match
+  // `/students/...`, and Express runs them in order until one handles the path.
+  router.use('/students', createStudentFinancialRouter());
   router.use('/students', createStudentRouter());
   router.use('/guardians', createGuardianRouter());
   router.use('/guardian-links', createGuardianLinkRouter());
   router.use('/enrolments', createEnrollmentRouter());
 
+  // What the school charges, and what each student therefore owes.
+  router.use('/fee-categories', createFeeCategoryRouter());
+  router.use('/fee-structures', createFeeStructureRouter());
+  router.use('/charges', createChargeRouter());
+  router.use('/charge-runs', createChargeRunRouter());
+  router.use('/scholarships', createScholarshipRouter());
+  router.use('/relief', createReliefRouter());
+
   // Mounted in later phases:
-  //   /fees            Phase 4
   //   /payments, /reconciliation                                          Phase 5
   //   /receipts        Phase 6
   //   /reports         Phase 8

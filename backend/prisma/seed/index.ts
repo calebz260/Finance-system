@@ -35,9 +35,12 @@ import {
   CLASS_SECTION_CODES,
   DEFAULT_SEED_PASSWORD,
   DEPARTMENTS,
+  FEE_CATEGORIES,
+  FEE_STRUCTURES,
   FORMER_STUDENTS,
   GUARDIANS,
   PROGRAMS,
+  SCHOLARSHIPS,
   SCHOOL,
   STUDENTS,
   USERS,
@@ -601,6 +604,112 @@ export async function seedDatabase(): Promise<SeedSummary> {
     });
   }
 
+  /* --------------------------------------------------------- fees (Phase 4) */
+
+  const feeCategoryIdByCode = new Map<string, string>();
+  for (const fixture of FEE_CATEGORIES) {
+    const category = await prisma.feeCategory.upsert({
+      where: { schoolId_code: { schoolId: school.id, code: fixture.code } },
+      create: {
+        schoolId: school.id,
+        code: fixture.code,
+        name: fixture.name,
+        description: fixture.description,
+        sortOrder: fixture.sortOrder,
+      },
+      update: {
+        name: fixture.name,
+        description: fixture.description,
+        sortOrder: fixture.sortOrder,
+      },
+    });
+    feeCategoryIdByCode.set(fixture.code, category.id);
+  }
+
+  for (const fixture of SCHOLARSHIPS) {
+    await prisma.scholarship.upsert({
+      where: { schoolId_code: { schoolId: school.id, code: fixture.code } },
+      create: {
+        schoolId: school.id,
+        code: fixture.code,
+        name: fixture.name,
+        description: fixture.description,
+        sponsor: fixture.sponsor,
+        defaultMethod: fixture.defaultPercentage === null ? 'FIXED' : 'PERCENTAGE',
+        defaultPercentage: fixture.defaultPercentage,
+        defaultAmount: fixture.defaultAmount,
+      },
+      update: { name: fixture.name, description: fixture.description, sponsor: fixture.sponsor },
+    });
+  }
+
+  // Structures are seeded ACTIVE so `npm run db:seed` leaves a database a charge run can
+  // actually be tried against. They deliberately raise **no charges**: seeding a term's
+  // billing would put money in the ledger that nobody authorised, and the point of the
+  // run is that a person triggers it.
+  let feeStructuresSeeded = 0;
+  for (const fixture of FEE_STRUCTURES) {
+    const academicYearId = academicYearIdByName.get(fixture.academicYearName);
+    if (academicYearId === undefined) continue;
+
+    const termId =
+      fixture.termName === null
+        ? null
+        : (termIdByYearAndSequence.get(
+            `${fixture.academicYearName}:${String(
+              ACADEMIC_YEARS.find((year) => year.name === fixture.academicYearName)?.terms.find(
+                (term) => term.name === fixture.termName,
+              )?.sequence ?? 0,
+            )}`,
+          ) ?? null);
+
+    const existing = await prisma.feeStructure.findFirst({
+      where: { schoolId: school.id, name: fixture.name },
+      select: { id: true },
+    });
+
+    const data = {
+      schoolId: school.id,
+      name: fixture.name,
+      description: fixture.description,
+      academicYearId,
+      termId,
+      programId:
+        fixture.programCode === null ? null : (programIdByCode.get(fixture.programCode) ?? null),
+      levelId: fixture.levelCode === null ? null : (levelIdByCode.get(fixture.levelCode) ?? null),
+      classSectionId: null,
+      residency: fixture.residency,
+      status: 'ACTIVE' as const,
+    };
+
+    const structure =
+      existing === null
+        ? await prisma.feeStructure.create({ data })
+        : await prisma.feeStructure.update({ where: { id: existing.id }, data });
+
+    for (const [index, item] of fixture.items.entries()) {
+      const feeCategoryId = feeCategoryIdByCode.get(item.categoryCode);
+      if (feeCategoryId === undefined) continue;
+
+      await prisma.feeStructureItem.upsert({
+        where: {
+          feeStructureId_feeCategoryId: { feeStructureId: structure.id, feeCategoryId },
+        },
+        create: {
+          schoolId: school.id,
+          feeStructureId: structure.id,
+          feeCategoryId,
+          label: item.label,
+          amount: item.amount,
+          sortOrder: index,
+        },
+        update: { label: item.label, amount: item.amount, sortOrder: index },
+      });
+    }
+
+    feeStructuresSeeded += 1;
+  }
+
   /* -------------------------------------------------------------------- summary */
 
   const counts = {
@@ -621,7 +730,15 @@ export async function seedDatabase(): Promise<SeedSummary> {
     currentEnrollments: await prisma.enrollment.count({
       where: { academicYearId: currentAcademicYearId, status: EnrollmentStatus.ENROLLED },
     }),
+    feeCategories: await prisma.feeCategory.count(),
+    feeStructures: await prisma.feeStructure.count(),
+    feeStructureItems: await prisma.feeStructureItem.count(),
+    scholarships: await prisma.scholarship.count(),
+    // Zero by design: the seed configures what a school charges, it does not bill a term.
+    studentCharges: await prisma.studentCharge.count(),
+    financialEntries: await prisma.financialEntry.count(),
   };
+  void feeStructuresSeeded;
 
   log.info({ counts }, 'Seed complete');
 

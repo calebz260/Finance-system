@@ -81,12 +81,37 @@ An update matches on the expected version and increments it. Zero rows affected 
 else won, and the request is rejected with `RECORD_MODIFIED` so the client reloads and retries
 rather than silently overwriting.
 
+### The financial ledger
+
+From Phase 4, **a balance is never stored and never derived from business records.**
+`financial_entries` is the authoritative ledger: charges, discounts, scholarship awards, waivers
+and adjustments each post one row when they take effect, and a balance is
+
+```sql
+SUM(amount) FILTER (WHERE entry_type = 'DEBIT')
+  - SUM(amount) FILTER (WHERE entry_type = 'CREDIT')
+```
+
+over that table and nothing else. Amounts are always positive; direction lives in `entry_type`,
+so no query has to reconstruct a sign convention.
+
+The table is insert-only. An entry that turns out to be wrong is undone by posting an opposing
+entry linked through `reversal_of_entry_id` — never by an UPDATE — so a reversal nets itself out
+arithmetically and the account still records that both things happened. Partial unique indexes
+permit exactly one opening entry per source record, which is what makes a double credit
+impossible under a retry or two concurrent approvals rather than merely unlikely. See ADR-022.
+
+There is deliberately **no balance column on any table**, and no `remainingAmount`, `totalPaid`
+or `paidAt` on a charge: whether a charge is settled is derived, because a stored answer is one
+a bug or a migration can set wrongly.
+
 ### Deletion
 
 Financial records and audit entries are never deleted. Soft deletion (`deletedAt`) is used
 only where a record genuinely needs withdrawing from active use without destroying history,
 and never as a substitute for a status field: a student who has left is a _status_, not a
-deletion.
+deletion. A charge raised in error is **voided**, which keeps the row, records who and why, and
+posts an opposing ledger entry.
 
 ### Transactions
 

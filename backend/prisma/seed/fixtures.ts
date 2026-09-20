@@ -201,6 +201,174 @@ export const PROGRAMS: readonly ProgramFixture[] = [
   },
 ];
 
+/* ------------------------------------------------------------ fees (Phase 4) */
+
+export interface FeeCategoryFixture {
+  readonly code: string;
+  readonly name: string;
+  readonly description: string;
+  readonly sortOrder: number;
+}
+
+/**
+ * The kinds of fee this school levies.
+ *
+ * Configuration, not code: another school's list differs, and this one changes without
+ * wanting a release. Kept close to what a Rwandan secondary school actually charges.
+ */
+export const FEE_CATEGORIES: readonly FeeCategoryFixture[] = [
+  { code: 'TUITION', name: 'Tuition', description: 'Termly teaching fee.', sortOrder: 1 },
+  {
+    code: 'REGISTRATION',
+    name: 'Registration',
+    description: 'Charged once per academic year on enrolment.',
+    sortOrder: 2,
+  },
+  {
+    code: 'BOARDING',
+    name: 'Boarding',
+    description: 'Accommodation and meals. Boarders only.',
+    sortOrder: 3,
+  },
+  {
+    code: 'EXAMINATION',
+    name: 'Examination',
+    description: 'Internal and national examination costs.',
+    sortOrder: 4,
+  },
+  {
+    code: 'PRACTICAL',
+    name: 'Practical and laboratory',
+    description: 'Consumables for laboratory and workshop sessions.',
+    sortOrder: 5,
+  },
+  {
+    code: 'MATERIALS',
+    name: 'Learning materials',
+    description: 'Books, handouts and stationery issued by the school.',
+    sortOrder: 6,
+  },
+];
+
+export interface FeeItemFixture {
+  readonly categoryCode: string;
+  readonly label: string;
+  /** Decimal string. Never a number — see `shared/src/money.ts`. */
+  readonly amount: string;
+}
+
+export interface FeeStructureFixture {
+  readonly name: string;
+  readonly description: string;
+  /** Academic year name, matched against `ACADEMIC_YEARS`. */
+  readonly academicYearName: string;
+  /** Term name within that year, or null for a once-per-year fee. */
+  readonly termName: string | null;
+  /** Level code, or null to apply across every level. */
+  readonly levelCode: string | null;
+  readonly programCode: string | null;
+  /** Restricts to boarders or day students. Null applies to both. */
+  readonly residency: 'DAY' | 'BOARDING' | null;
+  readonly items: readonly FeeItemFixture[];
+}
+
+/**
+ * Fee structures for the current year, exercising every applicability axis the model
+ * supports: a per-term level fee, a once-a-year registration fee with a null term, a
+ * boarding fee restricted by residency, and a programme-wide practical fee.
+ *
+ * Amounts are realistic for a Rwandan day/boarding secondary school in RWF, and entirely
+ * fictional.
+ */
+export const FEE_STRUCTURES: readonly FeeStructureFixture[] = [
+  {
+    name: 'Registration 2026',
+    description: 'Charged once when a student enrols for the year.',
+    academicYearName: '2026',
+    termName: null,
+    levelCode: null,
+    programCode: null,
+    residency: null,
+    items: [{ categoryCode: 'REGISTRATION', label: 'Annual registration', amount: '15000.00' }],
+  },
+  {
+    name: "O'Level tuition — Term 1 2026",
+    description: 'Termly tuition and materials for S1–S3.',
+    academicYearName: '2026',
+    termName: 'Term 1',
+    levelCode: null,
+    programCode: 'OLEVEL',
+    residency: null,
+    items: [
+      { categoryCode: 'TUITION', label: "Tuition — O'Level Term 1", amount: '95000.00' },
+      { categoryCode: 'MATERIALS', label: 'Learning materials', amount: '12500.00' },
+      { categoryCode: 'EXAMINATION', label: 'Termly examinations', amount: '8000.00' },
+    ],
+  },
+  {
+    name: 'Boarding — Term 1 2026',
+    description: 'Accommodation and meals. Applies to boarders only.',
+    academicYearName: '2026',
+    termName: 'Term 1',
+    levelCode: null,
+    programCode: null,
+    // The whole reason `Enrollment.residency` exists: a day student must never be
+    // charged for a bed.
+    residency: 'BOARDING',
+    items: [{ categoryCode: 'BOARDING', label: 'Boarding — Term 1', amount: '140000.00' }],
+  },
+  {
+    name: 'TVET practicals — Term 1 2026',
+    description: 'Workshop consumables for Software Development.',
+    academicYearName: '2026',
+    termName: 'Term 1',
+    levelCode: null,
+    programCode: 'TVET-SOD',
+    residency: null,
+    items: [
+      { categoryCode: 'TUITION', label: 'Tuition — TVET Term 1', amount: '105000.00' },
+      { categoryCode: 'PRACTICAL', label: 'Workshop consumables', amount: '25000.00' },
+    ],
+  },
+];
+
+export interface ScholarshipFixture {
+  readonly code: string;
+  readonly name: string;
+  readonly description: string;
+  readonly sponsor: string;
+  readonly defaultPercentage: string | null;
+  readonly defaultAmount: string | null;
+}
+
+/** Named award programmes. Fictional sponsors. */
+export const SCHOLARSHIPS: readonly ScholarshipFixture[] = [
+  {
+    code: 'DISTRICT-MERIT',
+    name: 'District Merit Bursary',
+    description: 'Awarded on national examination performance.',
+    sponsor: 'Kicukiro District Education Office',
+    defaultPercentage: '50.00',
+    defaultAmount: null,
+  },
+  {
+    code: 'STAFF-CHILD',
+    name: 'Staff Child Award',
+    description: 'For children of serving members of staff.',
+    sponsor: 'School governing board',
+    defaultPercentage: '25.00',
+    defaultAmount: null,
+  },
+  {
+    code: 'GIRLS-STEM',
+    name: 'Girls in STEM Bursary',
+    description: 'Supports girls continuing into science combinations.',
+    sponsor: 'Rwanda STEM Trust (fictional)',
+    defaultPercentage: null,
+    defaultAmount: '75000.00',
+  },
+];
+
 export interface TermFixture {
   readonly name: string;
   readonly sequence: number;

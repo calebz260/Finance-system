@@ -575,6 +575,298 @@ export interface ImportResult {
   readonly issuesTruncated: boolean;
 }
 
+/* ------------------------------------------------------------ fees and charges */
+
+export type FeeStructureState = 'DRAFT' | 'ACTIVE' | 'ARCHIVED';
+export type ChargeState = 'RAISED' | 'VOID';
+export type AdjustmentMethodValue = 'FIXED' | 'PERCENTAGE';
+export type ApprovalState = 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'REVERSED';
+
+export type EntryDirectionValue = 'DEBIT' | 'CREDIT';
+export type EntrySourceValue =
+  'CHARGE' | 'DISCOUNT' | 'SCHOLARSHIP' | 'WAIVER' | 'ADJUSTMENT' | 'PAYMENT';
+
+/**
+ * The four kinds of record that change what a family owes.
+ *
+ * Each is its own table with its own rules. This union is the *read* model: the student
+ * financial screen shows them in one list, ordered by when they happened, because that
+ * is how someone reads an account. Writes go to the type-specific endpoints.
+ */
+export type ReliefKind = 'DISCOUNT' | 'SCHOLARSHIP' | 'WAIVER' | 'ADJUSTMENT';
+
+/**
+ * Which way a relief record moves the balance once approved.
+ *
+ * Derived in exactly one place so no call site has to remember a sign convention. Only
+ * an adjustment can go either way, and it says so explicitly.
+ */
+export function reliefDirection(
+  kind: ReliefKind,
+  adjustmentDirection?: EntryDirectionValue,
+): EntryDirectionValue {
+  return kind === 'ADJUSTMENT' ? (adjustmentDirection ?? 'CREDIT') : 'CREDIT';
+}
+
+export interface FeeCategorySummary {
+  readonly id: string;
+  readonly code: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly isActive: boolean;
+  readonly sortOrder: number;
+  /** Charges already raised against this category. Blocks deactivation from meaning erasure. */
+  readonly chargeCount: number;
+  readonly version: number;
+}
+
+export interface FeeStructureItemSummary {
+  readonly id: string;
+  readonly feeCategoryId: string;
+  readonly feeCategoryCode: string;
+  readonly feeCategoryName: string;
+  readonly label: string;
+  /** Decimal string at scale 2. Never a JavaScript number. */
+  readonly amount: string;
+  readonly sortOrder: number;
+}
+
+export interface FeeStructureSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly academicYearId: string;
+  readonly academicYearName: string;
+  /** Null means the structure is charged once for the whole year. */
+  readonly termId: string | null;
+  readonly termName: string | null;
+  readonly programId: string | null;
+  readonly programName: string | null;
+  readonly levelId: string | null;
+  readonly levelName: string | null;
+  readonly classSectionId: string | null;
+  readonly classSectionName: string | null;
+  /** Null applies to both day students and boarders. */
+  readonly residency: ResidencyValue | null;
+  readonly status: FeeStructureState;
+  readonly items: readonly FeeStructureItemSummary[];
+  /** Sum of the items. Computed server-side. */
+  readonly totalAmount: string;
+  /** Once this is above zero the structure is locked against edits. */
+  readonly chargeCount: number;
+  readonly version: number;
+}
+
+export interface StudentChargeSummary {
+  readonly id: string;
+  readonly studentId: string;
+  /** The human-facing identifier, e.g. `STU-2026-00125`. */
+  readonly studentNumber: string;
+  readonly studentName: string;
+  readonly academicYearId: string;
+  readonly academicYearName: string;
+  readonly termId: string | null;
+  readonly termName: string | null;
+  readonly feeCategoryId: string;
+  readonly feeCategoryName: string;
+  readonly feeStructureId: string | null;
+  readonly feeStructureName: string | null;
+  /** Snapshot taken when the charge was raised. */
+  readonly description: string;
+  readonly amount: string;
+  /** Approved credits applied to this charge. */
+  readonly adjustedAmount: string;
+  /** `amount - adjustedAmount`, floored at zero. */
+  readonly netAmount: string;
+  readonly status: ChargeState;
+  readonly notes: string | null;
+  readonly raisedAt: string;
+  readonly voidedAt: string | null;
+  readonly voidReason: string | null;
+  readonly version: number;
+}
+
+/** A named award programme. The programme, not the money a student receives. */
+export interface ScholarshipSummary {
+  readonly id: string;
+  readonly code: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly sponsor: string | null;
+  readonly defaultMethod: AdjustmentMethodValue;
+  readonly defaultPercentage: string | null;
+  readonly defaultAmount: string | null;
+  readonly isActive: boolean;
+  /** Awards made under it. Stops deactivation being read as erasure. */
+  readonly awardCount: number;
+  readonly version: number;
+}
+
+/**
+ * One relief or adjustment record, in the unified read shape.
+ *
+ * `kind` says which table it came from. The fields that only apply to some kinds are
+ * nullable rather than split into a discriminated union, because the screen that shows
+ * these renders one table with one set of columns.
+ */
+export interface ReliefSummary {
+  readonly id: string;
+  readonly kind: ReliefKind;
+  readonly direction: EntryDirectionValue;
+  readonly studentId: string;
+  readonly studentNumber: string;
+  readonly studentName: string;
+  readonly studentChargeId: string | null;
+  readonly chargeDescription: string | null;
+  readonly academicYearId: string;
+  readonly termId: string | null;
+  readonly termName: string | null;
+  /** FIXED for waivers and adjustments, which are never expressed as a rate. */
+  readonly method: AdjustmentMethodValue;
+  readonly percentage: string | null;
+  readonly amount: string;
+  /** The scholarship programme's name, for a SCHOLARSHIP. Null otherwise. */
+  readonly scholarshipId: string | null;
+  readonly scholarshipName: string | null;
+  readonly reason: string;
+  readonly status: ApprovalState;
+  readonly requestedByName: string;
+  readonly requestedAt: string;
+  readonly decidedByName: string | null;
+  readonly decidedAt: string | null;
+  readonly decisionNote: string | null;
+  readonly reversedAt: string | null;
+  readonly reversalReason: string | null;
+  readonly version: number;
+}
+
+/**
+ * One line of the authoritative ledger.
+ *
+ * This is what a balance is actually made of. Shown on the student financial screen so a
+ * bursar can point at the line that explains a number, rather than inferring it from the
+ * business records.
+ */
+export interface FinancialEntrySummary {
+  readonly id: string;
+  readonly entryType: EntryDirectionValue;
+  readonly amount: string;
+  readonly source: EntrySourceValue;
+  readonly description: string;
+  readonly academicYearId: string;
+  readonly termId: string | null;
+  readonly termName: string | null;
+  readonly studentChargeId: string | null;
+  /** Set when this entry undoes an earlier one. */
+  readonly reversalOfEntryId: string | null;
+  readonly postedByName: string;
+  readonly postedAt: string;
+}
+
+/**
+ * A student's financial position.
+ *
+ * **Every figure comes from the financial ledger**, not from summing charges and relief
+ * records. The breakdown fields are the ledger grouped by source, so they always add up
+ * to `outstanding` by construction — a source record that never posted an entry cannot
+ * appear in a total, and one that posted twice cannot be counted once (ADR-022).
+ *
+ * Amounts are decimal strings. The web client displays them and never derives one.
+ *
+ * `outstanding` and `creditBalance` are mutually exclusive: a net position in the
+ * family's favour is reported as a credit rather than as a negative debt, so a negative
+ * number never has to be interpreted (ADR-021).
+ */
+export interface StudentBalance {
+  readonly studentId: string;
+  readonly studentNumber: string;
+  readonly studentName: string;
+  readonly currency: string;
+  /** Ledger DEBITs from charges. */
+  readonly totalCharged: string;
+  /** Ledger CREDITs from discounts, scholarships, waivers and crediting adjustments. */
+  readonly totalCredited: string;
+  /** Ledger DEBITs from debiting adjustments, e.g. an authorised late fee. */
+  readonly totalSurcharged: string;
+  /** Ledger CREDITs from payments. Always "0.00" until Phase 5 posts them. */
+  readonly totalPaid: string;
+  /** `Σ DEBIT − Σ CREDIT`, floored at zero. */
+  readonly outstanding: string;
+  /** The overpaid amount when the net position is in the family's favour. */
+  readonly creditBalance: string;
+  /** Requests awaiting a Finance Manager. They have posted nothing, so they are in no total above. */
+  readonly pendingApprovalCount: number;
+}
+
+/** A balance broken down by the period it belongs to. */
+export interface StudentBalancePeriod {
+  readonly academicYearId: string;
+  readonly academicYearName: string;
+  readonly termId: string | null;
+  readonly termName: string | null;
+  readonly totalCharged: string;
+  readonly totalCredited: string;
+  readonly totalSurcharged: string;
+  readonly totalPaid: string;
+  readonly outstanding: string;
+  readonly creditBalance: string;
+}
+
+export interface StudentFinancialSummary {
+  readonly balance: StudentBalance;
+  readonly periods: readonly StudentBalancePeriod[];
+  readonly charges: readonly StudentChargeSummary[];
+  /** Discounts, scholarship awards, waivers and adjustments, in one list. */
+  readonly reliefs: readonly ReliefSummary[];
+  /** The ledger lines the balance is actually computed from. */
+  readonly entries: readonly FinancialEntrySummary[];
+}
+
+/** One student's line in a charge-generation preview. */
+export interface ChargeRunPreviewLine {
+  readonly studentId: string;
+  readonly studentNumber: string;
+  readonly studentName: string;
+  readonly feeStructureId: string;
+  readonly feeStructureName: string;
+  readonly feeCategoryName: string;
+  readonly description: string;
+  readonly amount: string;
+  /** True when an identical charge already exists and would be skipped. */
+  readonly alreadyCharged: boolean;
+}
+
+/**
+ * A conflict that stops a run before it writes anything: two matching structures that
+ * would charge the same student the same category twice (ADR-019).
+ */
+export interface ChargeRunConflict {
+  readonly feeCategoryName: string;
+  readonly feeStructureIds: readonly string[];
+  readonly feeStructureNames: readonly string[];
+  readonly affectedStudentCount: number;
+}
+
+export interface ChargeRunPreview {
+  readonly academicYearId: string;
+  readonly termId: string | null;
+  readonly studentsMatched: number;
+  readonly chargesToCreate: number;
+  readonly chargesToSkip: number;
+  readonly totalAmount: string;
+  readonly conflicts: readonly ChargeRunConflict[];
+  readonly sample: readonly ChargeRunPreviewLine[];
+  readonly sampleTruncated: boolean;
+}
+
+export interface ChargeRunResult {
+  readonly chargeRunId: string;
+  readonly studentsMatched: number;
+  readonly chargesCreated: number;
+  readonly chargesSkipped: number;
+  readonly totalAmount: string;
+}
+
 /* ----------------------------------------------------------------- health check */
 
 export type HealthStatus = 'ok' | 'degraded' | 'down';

@@ -8,9 +8,10 @@ audit.
 Its purpose is to replace the school's manual fee-slip verification process, so the
 manual/offline payment path is a first-class workflow rather than an exception path.
 
-> **Build status: Phases 0–3 complete** — project foundation, the core domain schema,
-> authentication and authorisation, and student and academic management including the bulk
-> student import. Fees, payments, receipts and reporting land in Phases 4–15 — see [docs/ROADMAP.md](docs/ROADMAP.md) for exactly what exists today and
+> **Build status: Phases 0–4 complete** — project foundation, the core domain schema,
+> authentication and authorisation, student and academic management including the bulk student
+> import, and fee management with a financial ledger. Payments, receipts and reporting land in
+> Phases 5–15 — see [docs/ROADMAP.md](docs/ROADMAP.md) for exactly what exists today and
 > what does not. Nothing in this repository pretends to be finished before it is.
 
 ---
