@@ -216,7 +216,23 @@ describe('students, guardians and enrolment history', () => {
 
   it('preserves prior-year enrolment alongside the current one', async () => {
     const continuing = await prisma.student.findFirstOrThrow({
-      where: { enrollments: { some: { enrollmentType: 'CONTINUING' } } },
+      // The CONTINUING enrolment has to be the **current-year** one. Prior-year
+      // enrolments are all typed CONTINUING, including those of former students who
+      // have no current-year enrolment at all — matching on the type alone would
+      // sometimes select one of them and find a single enrolment, which is the right
+      // answer to the wrong question.
+      where: {
+        enrollments: {
+          some: {
+            academicYearId: summary.currentAcademicYearId,
+            enrollmentType: 'CONTINUING',
+          },
+        },
+      },
+      // Ordered, because PostgreSQL is free to return matching rows in any order and a
+      // test that depends on which one it picks is a test that fails on someone else's
+      // machine.
+      orderBy: { studentId: 'asc' },
       include: { enrollments: { orderBy: { startDate: 'asc' } } },
     });
 
