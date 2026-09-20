@@ -123,6 +123,23 @@ between the two is always visible rather than assumed closed.
 - **Denials are audited.** One `403` is usually a misconfigured account; a pattern of them is
   someone probing, and that distinction only exists if the attempts are recorded.
 
+### File upload, as it stands today (Phase 3)
+
+The bulk student import is the only endpoint that accepts a file. Until Phase 5 designs file
+handling properly, it is deliberately narrow:
+
+- the upload is held **in memory only** and discarded when the request ends, so nothing is
+  written to a path that has not yet been designed;
+- one file per request, capped at 5 MB, and the extension must be `.csv` or `.xlsx` — the
+  browser-supplied `Content-Type` is not trusted, because Excel files arrive variously as
+  `application/octet-stream` or as nothing at all;
+- committing an import requires `student.import` **and** a satisfied second factor, since one
+  upload can create a thousand students and their guardians;
+- the preview needs only `student.read`: it writes nothing.
+
+Malware scanning, storage outside any web-servable path and content validation for
+proof-of-payment documents arrive with Phase 5, which owns uploads.
+
 ## Arriving in later phases
 
 | Control                                                                                                         | Phase    |

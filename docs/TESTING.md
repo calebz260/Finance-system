@@ -80,6 +80,12 @@ about who the middleware admits. And **the negative cases matter more than the p
 ones**: a permission granted too widely produces no error and no symptom until someone uses
 it.
 
+**Phase 3** — Student ID allocation under concurrency and across schools; enrolment history
+appended rather than overwritten; a student status change ending the live enrolment; the
+guardian link flags that later become authorisation inputs; and the bulk import, which is
+tested against a realistically messy file and against a full 1,000-row run through the real
+transaction, because the row count is itself a property worth asserting.
+
 **Phase 4** — fee calculation per term; discounts, scholarships and waivers; adjustment
 authorisation; historical fee structures preserved when a new period is created.
 

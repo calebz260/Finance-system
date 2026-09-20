@@ -40,6 +40,37 @@ export const AuditAction = {
   // --- authorisation
   ACCESS_DENIED: 'auth.access_denied',
 
+  // --- academic structure (Phase 3)
+  ACADEMIC_YEAR_CREATED: 'academic.year.created',
+  ACADEMIC_YEAR_UPDATED: 'academic.year.updated',
+  ACADEMIC_YEAR_SET_CURRENT: 'academic.year.set_current',
+  TERM_CREATED: 'academic.term.created',
+  TERM_UPDATED: 'academic.term.updated',
+  TERM_SET_CURRENT: 'academic.term.set_current',
+  DEPARTMENT_CREATED: 'academic.department.created',
+  PROGRAM_CREATED: 'academic.program.created',
+  PROGRAM_UPDATED: 'academic.program.updated',
+  LEVEL_CREATED: 'academic.level.created',
+  LEVEL_UPDATED: 'academic.level.updated',
+  CLASS_SECTION_CREATED: 'academic.class_section.created',
+  CLASS_SECTION_UPDATED: 'academic.class_section.updated',
+
+  // --- students and guardians (Phase 3)
+  STUDENT_REGISTERED: 'student.registered',
+  STUDENT_UPDATED: 'student.updated',
+  STUDENT_STATUS_CHANGED: 'student.status_changed',
+  STUDENT_IMPORTED: 'student.imported',
+  GUARDIAN_CREATED: 'guardian.created',
+  GUARDIAN_UPDATED: 'guardian.updated',
+  GUARDIAN_LINKED: 'guardian.linked',
+  GUARDIAN_UNLINKED: 'guardian.unlinked',
+  GUARDIAN_LINK_UPDATED: 'guardian.link_updated',
+
+  // --- enrolment (Phase 3)
+  ENROLLMENT_CREATED: 'enrollment.created',
+  ENROLLMENT_UPDATED: 'enrollment.updated',
+  ENROLLMENT_ENDED: 'enrollment.ended',
+
   // --- account administration
   USER_CREATED: 'user.created',
   USER_UPDATED: 'user.updated',
@@ -61,6 +92,13 @@ export const AuditEntity = {
   GUARDIAN: 'Guardian',
   ENROLLMENT: 'Enrollment',
   SCHOOL: 'School',
+  ACADEMIC_YEAR: 'AcademicYear',
+  TERM: 'Term',
+  PROGRAM: 'Program',
+  LEVEL: 'Level',
+  CLASS_SECTION: 'ClassSection',
+  DEPARTMENT: 'Department',
+  STUDENT_GUARDIAN: 'StudentGuardian',
 } as const;
 
 export type AuditEntity = (typeof AuditEntity)[keyof typeof AuditEntity];

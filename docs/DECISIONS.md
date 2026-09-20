@@ -261,3 +261,95 @@ Super Administrator. That is the correct trade: a single account able to grant i
 not an administrator, it is a superuser.
 
 **Verified by** the role-assignment cases in `backend/tests/integration/authorization.test.ts`.
+
+---
+
+## ADR-015: A bulk import validates in full, previews, and then applies all or nothing
+
+**Status:** accepted (Phase 3)
+
+`POST /students/import/preview` parses and validates an uploaded file and writes nothing. It
+reports every problem it found, each against the row number the spreadsheet shows.
+`POST /students/import` re-validates and applies the file in a single transaction; by default
+a file with any problem imports nothing, and importing only the valid rows is an explicit
+opt-in.
+
+**Why.** The file this feature exists for is the school's real one: about a thousand students,
+typed by several people over several years, with inconsistent dates, phone formats and
+spellings. Two properties follow from that.
+
+Stopping at the first bad row would mean fixing a thousand-row file one error per upload, so
+validation collects everything. And a partially applied import is worse than a failed one: the
+registrar cannot tell which rows landed, and re-running duplicates the ones that did — with a
+Student ID allocated to each, which is the one thing that must never be issued twice. One
+transaction makes "try again" always safe.
+
+Re-validating at commit rather than trusting the preview means no server-side state between
+the two calls, and no window in which the structure changes underneath a stale preview.
+
+**Cost.** The file is uploaded and parsed twice. At five megabytes and a hundred milliseconds
+that is a fair price for not having to reconcile a half-applied import.
+
+**Verified by** `backend/tests/integration/student-import.test.ts`, including a 1,000-row file.
+
+---
+
+## ADR-016: An imported guardian is recognised by normalised phone number
+
+**Status:** accepted (Phase 3)
+
+Guardian phone numbers are normalised to `+250…` before matching, and a guardian already
+present — in the file or in the database — is linked rather than created again.
+
+**Why.** Four siblings in one file carry the same parent on four rows, written `0788123456`,
+`+250 788 123 456` and `250788123456`. Creating a guardian per row would give that parent four
+records, and the parent portal in Phase 5 would then show each of them one child while the
+school believes it has one contact. The phone number is the only field these files reliably
+carry and reliably repeat, which makes it the practical identity.
+
+**Cost.** Two guardians who genuinely share a household line are merged into one. That is the
+right default for a fee system — the number is how the school reaches whoever pays — and the
+link can be corrected afterwards, whereas a duplicated parent is discovered only when somebody
+cannot see their child.
+
+**Verified by** the sibling and pre-existing-guardian cases in
+`backend/tests/integration/student-import.test.ts`.
+
+---
+
+## ADR-017: Import files are parsed in memory and never written to disk
+
+**Status:** accepted (Phase 3)
+
+Uploads are held in memory by `multer.memoryStorage`, capped at 5 MB and one file, parsed, and
+discarded when the request ends.
+
+**Why.** Phase 5 owns file handling: where uploads live, how long they are kept, who may read
+them, and malware scanning for proof-of-payment documents. Writing import files to disk now
+would establish a storage convention before any of those decisions were made, and Phase 5
+would have to undo it. Parsing in memory keeps the feature complete without pre-empting that
+design, and an import file is transient by nature — it is a means of getting data in, not a
+record the school needs to keep.
+
+**Cost.** A hard size limit, and no server-side retry of a failed upload. Both are acceptable
+for a file that is re-exported from a spreadsheet in seconds.
+
+---
+
+## ADR-018: Registration creates the student and the first enrolment together
+
+**Status:** accepted (Phase 3)
+
+`POST /students` takes the placement in the same body and writes both, or neither.
+
+**Why.** An enrolment is what ties a student to a year, a programme, a level and a class, and
+every later charge is computed against it. A student row without one is invisible to fee
+calculation, class lists and every report — and nothing surfaces the omission, because the
+record looks complete. Making placement a second request means it is a second request that
+sometimes does not happen.
+
+**Cost.** A student cannot be recorded before their placement is known. In practice a school
+registers a student _into_ a class, so this matches the actual paperwork; a student whose class
+is undecided can be enrolled at level with the class left unset.
+
+**Verified by** the registration cases in `backend/tests/integration/students.test.ts`.

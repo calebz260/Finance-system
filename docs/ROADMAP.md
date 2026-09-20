@@ -79,12 +79,45 @@ until Phase 6, so `PasswordResetDelivery` logs in development and reports loudly
 Editing a role&#39;s permissions at runtime (`role.manage`) has a permission but no endpoint;
 changing the matrix for everyone holding a role deserves its own design.
 
-## ⬜ Phase 3 — Student and academic management
+## ✅ Phase 3 — Student and academic management
 
 Student registration and Student ID allocation, student profile, parent linking, classes,
 programmes, levels, academic years and terms, enrolment history, student status, and the
 **bulk CSV/Excel import** for the school's existing ~1,000+ students with a
 validation-and-preview step and row-level error reporting.
+
+**Delivered:**
+
+- Academic structure — years, terms, departments, programmes, levels and classes — with the
+  invariants every later phase depends on: exactly one current year and one current term, a
+  term that lies inside its year and overlaps no sibling, a closed period that cannot be
+  reopened, and a level chain that is single-successor and acyclic because promotion walks it.
+- Student registration with the Student ID allocated from the per-school counter inside the
+  same transaction as the insert, and the first enrolment created alongside it — a student
+  with no enrolment cannot be charged, placed or reported on.
+- Profile editing that cannot touch the Student ID or the status; a lifecycle endpoint that
+  validates the transition and ends the live enrolment when the student leaves; and enrolment
+  history that is appended, never overwritten.
+- Guardians, and the student–guardian link carrying the financial rights Section 26 turns into
+  authorisation: who the school rings, who pays, who may see a balance, who may pay online.
+  Exactly one primary contact per student, and every change to those flags audited with its
+  before and after.
+- **Bulk import** of `.csv` and `.xlsx`, in two steps. A preview writes nothing and reports
+  every problem against the row number the registrar sees on screen; the commit applies in one
+  transaction and refuses by default if any row failed. Column headings are matched by alias,
+  dates are read in the three formats these files contain, and a parent repeated across
+  siblings is recognised by normalised phone number and linked once rather than duplicated.
+- Web client: the student roll with search and class filters, registration, the student page
+  with guardians and history, the import wizard, and the academic-setup screen.
+
+**Test coverage:** 468 backend tests — including a 1,000-row import through the real
+transaction — and 52 frontend tests. The full local verification gate (format, lint,
+typecheck, test, build) passes against PostgreSQL 17; CI has not yet run this phase.
+
+**Deferred with a reason:** uploaded files are parsed in memory and discarded. Persistent
+upload storage, its path rules and malware scanning belong to Phase 5, which owns file
+handling, and this feature deliberately does not pre-empt that design. Promotion itself is
+Phase 9; the level chain it walks is in place and tested here.
 
 ## ⬜ Phase 4 — Fee management
 

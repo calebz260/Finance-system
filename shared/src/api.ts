@@ -320,6 +320,261 @@ export interface SessionSummary {
   readonly expiresAt: string;
 }
 
+/* ------------------------------------------------------- academic structure */
+
+export type PeriodState = 'UPCOMING' | 'ACTIVE' | 'CLOSED';
+export type ProgramState = 'ACTIVE' | 'DISCONTINUED';
+
+export interface DepartmentSummary {
+  readonly id: string;
+  readonly code: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly programCount: number;
+}
+
+export interface ProgramSummary {
+  readonly id: string;
+  readonly code: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly departmentId: string | null;
+  readonly departmentName: string | null;
+  readonly durationYears: number | null;
+  readonly status: ProgramState;
+  readonly sortOrder: number;
+  readonly levelCount: number;
+  readonly version: number;
+}
+
+/**
+ * A stage within a programme.
+ *
+ * `nextLevelId` is what makes end-of-year promotion a data lookup rather than a rule in
+ * code, and `isTerminal` marks the level after which a student has completed.
+ */
+export interface LevelSummary {
+  readonly id: string;
+  readonly programId: string;
+  readonly programName: string;
+  readonly code: string;
+  readonly name: string;
+  readonly sequence: number;
+  readonly isTerminal: boolean;
+  readonly nextLevelId: string | null;
+}
+
+export interface ClassSectionSummary {
+  readonly id: string;
+  readonly academicYearId: string;
+  readonly levelId: string;
+  readonly levelName: string;
+  readonly code: string;
+  readonly name: string;
+  readonly capacity: number | null;
+  readonly classTeacherName: string | null;
+  /** Students currently enrolled in this section. Derived, never stored. */
+  readonly enrolledCount: number;
+  readonly version: number;
+}
+
+export interface TermSummary {
+  readonly id: string;
+  readonly academicYearId: string;
+  readonly name: string;
+  readonly sequence: number;
+  /** ISO-8601 date, no time component. */
+  readonly startDate: string;
+  readonly endDate: string;
+  readonly status: PeriodState;
+  readonly isCurrent: boolean;
+  readonly version: number;
+}
+
+export interface AcademicYearSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly startDate: string;
+  readonly endDate: string;
+  readonly status: PeriodState;
+  readonly isCurrent: boolean;
+  readonly terms: readonly TermSummary[];
+  readonly version: number;
+}
+
+/* -------------------------------------------------------------------- students */
+
+export type StudentState =
+  'ACTIVE' | 'COMPLETED' | 'TRANSFERRED' | 'WITHDRAWN' | 'SUSPENDED' | 'ARCHIVED';
+
+export type GenderValue = 'FEMALE' | 'MALE' | 'OTHER' | 'UNDISCLOSED';
+export type ResidencyValue = 'DAY' | 'BOARDING';
+
+export type EnrollmentState =
+  'ENROLLED' | 'PROMOTED' | 'REPEATED' | 'COMPLETED' | 'TRANSFERRED_OUT' | 'WITHDRAWN';
+
+export type EnrollmentKind = 'NEW' | 'CONTINUING' | 'REPEAT' | 'RE_ADMISSION' | 'TRANSFER_IN';
+
+export type GuardianRelation = 'MOTHER' | 'FATHER' | 'GUARDIAN' | 'SIBLING' | 'SPONSOR' | 'OTHER';
+
+/** A student as a list row: enough to identify and place them, and nothing more. */
+export interface StudentSummary {
+  readonly id: string;
+  /** The human-facing identifier staff actually use, e.g. `STU-2026-00125`. */
+  readonly studentId: string;
+  readonly firstName: string;
+  readonly lastName: string;
+  readonly otherNames: string | null;
+  readonly gender: GenderValue;
+  readonly status: StudentState;
+  readonly admissionDate: string;
+  readonly admissionYear: number;
+  /** The student's placement for the current academic year, when they have one. */
+  readonly currentEnrollment: EnrollmentSummary | null;
+  readonly version: number;
+}
+
+/** The full profile, for the student's own page. */
+export interface StudentDetail extends StudentSummary {
+  readonly dateOfBirth: string | null;
+  readonly nationalIdNumber: string | null;
+  readonly district: string | null;
+  readonly sector: string | null;
+  readonly address: string | null;
+  readonly phone: string | null;
+  readonly email: string | null;
+  readonly guardians: readonly StudentGuardianLink[];
+  /** Newest first. Append-only: no historical enrolment is ever overwritten. */
+  readonly enrollments: readonly EnrollmentSummary[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface EnrollmentSummary {
+  readonly id: string;
+  readonly studentId: string;
+  readonly academicYearId: string;
+  readonly academicYearName: string;
+  readonly programId: string;
+  readonly programName: string;
+  readonly levelId: string;
+  readonly levelName: string;
+  readonly classSectionId: string | null;
+  readonly classSectionName: string | null;
+  readonly status: EnrollmentState;
+  readonly enrollmentType: EnrollmentKind;
+  readonly residency: ResidencyValue;
+  readonly startDate: string;
+  readonly endDate: string | null;
+  readonly exitReason: string | null;
+  readonly version: number;
+}
+
+/* ------------------------------------------------------------------- guardians */
+
+export interface GuardianSummary {
+  readonly id: string;
+  readonly firstName: string;
+  readonly lastName: string;
+  readonly phone: string;
+  readonly altPhone: string | null;
+  readonly email: string | null;
+  readonly nationalIdNumber: string | null;
+  readonly occupation: string | null;
+  readonly district: string | null;
+  readonly sector: string | null;
+  readonly address: string | null;
+  /** Set when the guardian has a parent-portal account. */
+  readonly userId: string | null;
+  readonly linkedStudentCount: number;
+  readonly version: number;
+}
+
+/**
+ * A guardian's link to one student, carrying the financial rights Section 26 turns into
+ * authorisation checks. A parent may only see and pay for students they are linked to.
+ */
+export interface StudentGuardianLink {
+  readonly id: string;
+  readonly guardianId: string;
+  readonly studentId: string;
+  readonly guardianFirstName: string;
+  readonly guardianLastName: string;
+  readonly guardianPhone: string;
+  readonly relationship: GuardianRelation;
+  readonly isPrimaryContact: boolean;
+  readonly isFinanciallyResponsible: boolean;
+  readonly canViewFinancials: boolean;
+  readonly canInitiatePayments: boolean;
+  readonly version: number;
+}
+
+/* --------------------------------------------------------------- bulk import */
+
+/**
+ * One problem with one row of an uploaded file.
+ *
+ * `row` is the spreadsheet row number the person is looking at, counting the header as
+ * row 1 — not a zero-based array index. Telling someone "row 0 is wrong" when their
+ * screen shows row 2 is how an import becomes unusable at a thousand records.
+ */
+export interface ImportRowIssue {
+  readonly row: number;
+  /** The column header the problem belongs to, when it belongs to one. */
+  readonly column: string | null;
+  readonly message: string;
+  /** The offending value, echoed back so the row is findable in a large file. */
+  readonly value: string | null;
+}
+
+/** A row that parsed and validated, shown in the preview before anything is written. */
+export interface ImportPreviewRow {
+  readonly row: number;
+  readonly firstName: string;
+  readonly lastName: string;
+  readonly otherNames: string | null;
+  readonly gender: GenderValue;
+  readonly dateOfBirth: string | null;
+  readonly admissionDate: string;
+  readonly levelCode: string;
+  readonly programCode: string;
+  readonly classSectionCode: string | null;
+  readonly residency: ResidencyValue;
+  readonly guardianName: string | null;
+  readonly guardianPhone: string | null;
+  readonly guardianRelationship: GuardianRelation | null;
+}
+
+/**
+ * The result of validating an uploaded file, before any record is created.
+ *
+ * Nothing is written by a preview. The counts and the issue list are what a registrar
+ * uses to decide whether to fix the spreadsheet or to proceed.
+ */
+export interface ImportPreview {
+  readonly fileName: string;
+  readonly totalRows: number;
+  readonly validRows: number;
+  readonly rowsWithIssues: number;
+  /** Capped, because a file with one wrong header produces one issue per row. */
+  readonly issues: readonly ImportRowIssue[];
+  readonly issuesTruncated: boolean;
+  /** The first rows that would be created, so the mapping can be eyeballed. */
+  readonly sample: readonly ImportPreviewRow[];
+}
+
+/** The result of committing an import. */
+export interface ImportResult {
+  readonly studentsCreated: number;
+  readonly guardiansCreated: number;
+  readonly guardiansLinked: number;
+  readonly enrollmentsCreated: number;
+  /** Rows rejected by validation. An import either applies every valid row or none. */
+  readonly rowsRejected: number;
+  readonly issues: readonly ImportRowIssue[];
+  readonly issuesTruncated: boolean;
+}
+
 /* ----------------------------------------------------------------- health check */
 
 export type HealthStatus = 'ok' | 'degraded' | 'down';

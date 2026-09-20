@@ -25,6 +25,8 @@ export interface NavigationItem {
  */
 const NAVIGATION: readonly NavigationItem[] = [
   { label: 'System status', to: '/' },
+  { label: 'Students', to: '/students', permission: Permission.STUDENT_READ },
+  { label: 'Academic setup', to: '/academic', permission: Permission.ACADEMIC_READ },
   { label: 'User accounts', to: '/users', permission: Permission.USER_READ },
   { label: 'Your account', to: '/account' },
 ];

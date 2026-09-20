@@ -4,12 +4,17 @@ import { PermissionKey } from '@sfs/shared';
 
 import { RequireAuth } from './components/auth/RequireAuth';
 import { AppLayout } from './components/layout/AppLayout';
+import { AcademicPage } from './pages/AcademicPage';
 import { AccountPage } from './pages/AccountPage';
 import { ChangePasswordPage } from './pages/ChangePasswordPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { SignInPage } from './pages/SignInPage';
+import { StudentDetailPage } from './pages/StudentDetailPage';
+import { StudentImportPage } from './pages/StudentImportPage';
+import { StudentRegisterPage } from './pages/StudentRegisterPage';
+import { StudentsPage } from './pages/StudentsPage';
 import { SystemStatusPage } from './pages/SystemStatusPage';
 import { UsersPage } from './pages/UsersPage';
 
@@ -54,6 +59,47 @@ export function App(): React.JSX.Element {
           element={
             <RequireAuth>
               <ChangePasswordPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/students"
+          element={
+            <RequireAuth permissions={[PermissionKey.STUDENT_READ]}>
+              <StudentsPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/students/new"
+          element={
+            <RequireAuth permissions={[PermissionKey.STUDENT_CREATE]}>
+              <StudentRegisterPage />
+            </RequireAuth>
+          }
+        />
+        {/* Before the :studentId route, or "import" is read as an id. */}
+        <Route
+          path="/students/import"
+          element={
+            <RequireAuth permissions={[PermissionKey.STUDENT_IMPORT]}>
+              <StudentImportPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/students/:studentId"
+          element={
+            <RequireAuth permissions={[PermissionKey.STUDENT_READ]}>
+              <StudentDetailPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/academic"
+          element={
+            <RequireAuth permissions={[PermissionKey.ACADEMIC_READ]}>
+              <AcademicPage />
             </RequireAuth>
           }
         />

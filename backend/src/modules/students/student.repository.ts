@@ -23,6 +23,37 @@ import { requireVersionedUpdate } from '../../lib/optimistic-lock.js';
 import { prisma, type PrismaTransactionClient } from '../../lib/prisma.js';
 import type { ResolvedPagination } from '../../lib/http.js';
 
+/**
+ * The relations an enrolment is always read with.
+ *
+ * Names rather than ids, because every screen that shows an enrolment shows the year,
+ * programme, level and class by name, and fetching them separately per row is the N+1
+ * this layer exists to prevent.
+ */
+const ENROLLMENT_RELATIONS = {
+  academicYear: { select: { name: true } },
+  program: { select: { name: true } },
+  level: { select: { name: true } },
+  classSection: { select: { name: true } },
+} as const satisfies Prisma.EnrollmentInclude;
+
+export type EnrollmentWithRelations = Prisma.EnrollmentGetPayload<{
+  include: typeof ENROLLMENT_RELATIONS;
+}>;
+
+export type StudentWithEnrollment = Prisma.StudentGetPayload<{
+  include: { enrollments: { include: typeof ENROLLMENT_RELATIONS } };
+}>;
+
+export type StudentDetailRecord = Prisma.StudentGetPayload<{
+  include: {
+    guardians: {
+      include: { guardian: { select: { firstName: true; lastName: true; phone: true } } };
+    };
+    enrollments: { include: typeof ENROLLMENT_RELATIONS };
+  };
+}>;
+
 export interface StudentListFilters {
   /** Free-text search across Student ID and name. */
   readonly search?: string;
@@ -202,6 +233,165 @@ export class StudentRepository {
       throw new Error(`Student ${args.id} disappeared immediately after a successful update`);
     }
     return updated;
+  }
+
+  /* ------------------------------------------------- Phase 3: joined reads */
+
+  /**
+   * A page of students, each with the enrolment that places them in the given year.
+   *
+   * The enrolment is fetched in the same query rather than per row. A thousand-student
+   * list with a follow-up query per student is the N+1 that makes a registrar's first
+   * page load take ten seconds, and it is invisible until the school has real data.
+   */
+  async listWithCurrentEnrollment(
+    scope: AccessScope,
+    filters: StudentListFilters,
+    pagination: ResolvedPagination,
+    currentAcademicYearId: string | null,
+  ): Promise<PagedResult<StudentWithEnrollment>> {
+    const where = this.buildWhere(scope, filters);
+
+    const [items, totalItems] = await Promise.all([
+      this.db.student.findMany({
+        where,
+        include: {
+          enrollments: {
+            // Restricted to the current year, so "current enrolment" cannot silently
+            // become "whatever enrolment happened to sort first".
+            where:
+              currentAcademicYearId === null
+                ? { id: '00000000-0000-0000-0000-000000000000' }
+                : { academicYearId: currentAcademicYearId },
+            include: ENROLLMENT_RELATIONS,
+            orderBy: { startDate: 'desc' },
+            take: 1,
+          },
+        },
+        orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }, { studentId: 'asc' }],
+        skip: pagination.skip,
+        take: pagination.take,
+      }),
+      this.db.student.count({ where }),
+    ]);
+
+    return { items, totalItems };
+  }
+
+  /**
+   * One student with their guardians and their whole enrolment history.
+   *
+   * The history is append-only and returned newest first: promotion, repetition,
+   * transfer and withdrawal each add a row, and none of them overwrites an earlier one.
+   */
+  async findDetail(scope: AccessScope, id: string): Promise<StudentDetailRecord | null> {
+    return this.db.student.findFirst({
+      where: scope.where({ id }),
+      include: {
+        guardians: {
+          include: { guardian: { select: { firstName: true, lastName: true, phone: true } } },
+          orderBy: [{ isPrimaryContact: 'desc' }, { createdAt: 'asc' }],
+        },
+        enrollments: {
+          include: ENROLLMENT_RELATIONS,
+          orderBy: { startDate: 'desc' },
+        },
+      },
+    });
+  }
+
+  /** Fetched unscoped so a cross-school attempt can be recorded as one, then refused. */
+  async findDetailUnscoped(id: string): Promise<StudentDetailRecord | null> {
+    return this.db.student.findFirst({
+      where: { id },
+      include: {
+        guardians: {
+          include: { guardian: { select: { firstName: true, lastName: true, phone: true } } },
+          orderBy: [{ isPrimaryContact: 'desc' }, { createdAt: 'asc' }],
+        },
+        enrollments: {
+          include: ENROLLMENT_RELATIONS,
+          orderBy: { startDate: 'desc' },
+        },
+      },
+    });
+  }
+
+  /**
+   * Change a student's lifecycle status, conditional on version.
+   *
+   * Separate from `update` because it is not a field edit: it carries its own audit
+   * action, and leaving the school is a decision rather than a correction.
+   */
+  async setStatus(
+    scope: AccessScope,
+    args: { id: string; expectedVersion: number; status: StudentStatus },
+  ): Promise<StudentModel> {
+    await requireVersionedUpdate(
+      this.db.student.updateMany({
+        where: scope.where({ id: args.id, version: args.expectedVersion }),
+        data: { status: args.status, version: { increment: 1 } },
+      }),
+      'student',
+    );
+
+    const updated = await this.findById(scope, args.id);
+    if (updated === null) {
+      throw new Error(`Student ${args.id} disappeared immediately after a status change`);
+    }
+    return updated;
+  }
+
+  /**
+   * Create many students in one transaction, allocating each identifier from the same
+   * counter.
+   *
+   * All-or-nothing on purpose: a bulk import that half-applies leaves a registrar
+   * unable to tell which of a thousand rows landed, and re-running it would duplicate
+   * the ones that did.
+   */
+  async createMany(
+    scope: AccessScope,
+    rows: readonly CreateStudentInput[],
+    options: { studentIdPrefix?: string } = {},
+  ): Promise<StudentModel[]> {
+    const schoolId = scope.requireSchoolId();
+
+    return prisma.$transaction(async (tx) => {
+      const created: StudentModel[] = [];
+
+      for (const input of rows) {
+        const admissionYear = input.admissionDate.getUTCFullYear();
+        const studentId = await allocateStudentId(tx, {
+          schoolId,
+          admissionYear,
+          ...(options.studentIdPrefix !== undefined ? { prefix: options.studentIdPrefix } : {}),
+        });
+
+        created.push(
+          await tx.student.create({
+            data: {
+              schoolId,
+              studentId,
+              firstName: input.firstName,
+              lastName: input.lastName,
+              otherNames: input.otherNames ?? null,
+              ...(input.gender !== undefined ? { gender: input.gender } : {}),
+              dateOfBirth: input.dateOfBirth ?? null,
+              admissionDate: input.admissionDate,
+              admissionYear,
+              district: input.district ?? null,
+              sector: input.sector ?? null,
+              address: input.address ?? null,
+              phone: input.phone ?? null,
+              email: input.email ?? null,
+            },
+          }),
+        );
+      }
+
+      return created;
+    });
   }
 
   private buildWhere(scope: AccessScope, filters: StudentListFilters): Prisma.StudentWhereInput {
