@@ -20,6 +20,21 @@ const DOMAIN_TABLES = [
   'mfa_recovery_codes',
   'refresh_tokens',
   'sessions',
+  // Financial tables, listed before the academic ones they reference. The ledger goes
+  // first: an entry points at a charge, an account and a relief record, so emptying it
+  // last would rely on CASCADE arriving from three directions.
+  'financial_entries',
+  'student_financial_accounts',
+  'financial_adjustments',
+  'fee_waivers',
+  'student_scholarships',
+  'scholarships',
+  'discounts',
+  'student_charges',
+  'charge_runs',
+  'fee_structure_items',
+  'fee_structures',
+  'fee_categories',
   'enrollments',
   'student_guardians',
   'guardians',

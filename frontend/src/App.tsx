@@ -7,6 +7,9 @@ import { AppLayout } from './components/layout/AppLayout';
 import { AcademicPage } from './pages/AcademicPage';
 import { AccountPage } from './pages/AccountPage';
 import { ChangePasswordPage } from './pages/ChangePasswordPage';
+import { ChargeRunPage } from './pages/ChargeRunPage';
+import { FeesPage } from './pages/FeesPage';
+import { StudentFinancialsPage } from './pages/StudentFinancialsPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { ResetPasswordPage } from './pages/ResetPasswordPage';
@@ -108,6 +111,33 @@ export function App(): React.JSX.Element {
           element={
             <RequireAuth permissions={[PermissionKey.USER_READ]}>
               <UsersPage />
+            </RequireAuth>
+          }
+        />
+
+        {/* Fees. Configuration and billing are separate routes because they are
+            separate permissions: setting a price is not the same act as charging it. */}
+        <Route
+          path="/fees"
+          element={
+            <RequireAuth permissions={[PermissionKey.FEE_STRUCTURE_READ]}>
+              <FeesPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/fees/charge-runs"
+          element={
+            <RequireAuth permissions={[PermissionKey.CHARGE_READ]}>
+              <ChargeRunPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/students/:studentId/financials"
+          element={
+            <RequireAuth permissions={[PermissionKey.CHARGE_READ]}>
+              <StudentFinancialsPage />
             </RequireAuth>
           }
         />

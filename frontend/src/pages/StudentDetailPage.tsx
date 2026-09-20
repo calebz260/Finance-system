@@ -57,11 +57,20 @@ export function StudentDetailPage(): React.JSX.Element {
                 </span>
               }
               actions={
-                <Link to="/students">
-                  <Button variant="ghost" size="sm">
-                    Back to students
-                  </Button>
-                </Link>
+                <div className="flex gap-2">
+                  {can(PermissionKey.CHARGE_READ) ? (
+                    <Link to={`/students/${data.id}/financials`}>
+                      <Button variant="secondary" size="sm">
+                        Financial account
+                      </Button>
+                    </Link>
+                  ) : null}
+                  <Link to="/students">
+                    <Button variant="ghost" size="sm">
+                      Back to students
+                    </Button>
+                  </Link>
+                </div>
               }
             />
             <CardBody>

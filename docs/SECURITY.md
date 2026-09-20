@@ -123,6 +123,38 @@ between the two is always visible rather than assumed closed.
 - **Denials are audited.** One `403` is usually a misconfigured account; a pattern of them is
   someone probing, and that distinction only exists if the attempts are recorded.
 
+### Financial controls (Phase 4)
+
+The money-moving endpoints are governed by the separation of duties already encoded in the role
+matrix, not by new rules invented for this phase:
+
+- **Setting a price is not charging it.** `fee_structure.manage` configures categories and
+  structures; `charge.create` raises obligations. A School Administrator holds the first and not
+  the second; a Bursar holds the second and not the first.
+- **Nobody writes off what they collect.** A Bursar may request a discount, scholarship, waiver
+  or adjustment; only a Finance Manager may approve one, and only a Finance Manager may void a
+  charge. The service additionally refuses to let anyone approve their own request, regardless
+  of permissions — a Finance Manager holds both and would otherwise be a single point of
+  authorisation for money leaving the ledger.
+- **Every financial write requires a satisfied second factor.** All four roles that reach these
+  routes are MFA-required, so `requireMfaSatisfied` is not extra friction: it is the guarantee
+  that a stolen password alone cannot move money.
+- **Cross-tenant reads answer 404, not 403**, including balances — otherwise a balance endpoint
+  becomes a way to confirm that a student id exists in another school.
+
+Amounts arrive as **strings** and are rejected if sent as JSON numbers, which have already lost
+precision by the time a validator sees them. Percentages are bounded at the database. Every
+monetary column carries a check constraint, and the ledger's are the strictest: a positive
+amount, exactly one source reference matching its source, and no self-reversal.
+
+The ledger is insert-only by construction — there is no update or delete path in the application
+— and Phase 11 revokes UPDATE and DELETE on `financial_entries` and `audit_logs` from the
+application role, so the code cannot regain one.
+
+**Not yet hardened:** the hash chain on `audit_logs` and the database-level privilege revocation
+are Phase 11. Until then insert-only is an application-level property, enforced by there being
+no other code path, rather than by the database refusing.
+
 ### File upload, as it stands today (Phase 3)
 
 The bulk student import is the only endpoint that accepts a file. Until Phase 5 designs file

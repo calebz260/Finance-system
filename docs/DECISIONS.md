@@ -353,3 +353,96 @@ registers a student _into_ a class, so this matches the actual paperwork; a stud
 is undecided can be enrolled at level with the class left unset.
 
 **Verified by** the registration cases in `backend/tests/integration/students.test.ts`.
+
+## ADR-019: Two fee structures charging one category refuse the run
+
+**Status:** accepted (Phase 4)
+
+Applicability is a filter, not a hierarchy: a fee structure matches a student when every field it
+specifies matches their enrolment, and a null field does not narrow. Several structures may
+therefore match one student, and they all contribute. If two of them would charge the same fee
+category for the same period, charge generation aborts before writing anything and names the
+category, the structures and the number of students affected.
+
+**Why.** The alternative designs are worse in different directions. Charging both silently
+doubles a family's tuition and looks correct in every individual record. "Most specific wins"
+avoids that, but introduces precedence rules — class beats level beats programme — which have to
+be held in someone's head to predict what a run will do, and which make "why was this student
+charged less?" a question with a non-obvious answer years later. Refusing keeps the model
+additive and with no precedence to misread, and an overlap is nearly always a misconfiguration
+rather than an intention.
+
+**Cost.** A school that genuinely wants one category billed by two structures cannot express it.
+The escape hatch is an ad-hoc charge, which carries a mandatory reason.
+
+**Verified by** the overlap cases in `backend/tests/integration/fees.test.ts`.
+
+## ADR-020: The duplicate-charge key is the fee-structure line
+
+**Status:** accepted (Phase 4)
+
+A student may hold only one live charge per fee-structure item per period. Enforced by two partial
+unique indexes rather than one, because the key branches on whether the charge is termly
+(`term_id` set) or annual (`term_id` null), and PostgreSQL treats nulls as distinct — a single
+index over the nullable column would silently permit duplicates of every annual charge.
+
+Both indexes exclude voided rows, so a charge raised in error can be voided and the correct one
+raised in its place. Both leave ad-hoc charges unconstrained, since their `fee_structure_item_id`
+is null and nulls do not conflict.
+
+**Why.** Re-running generation is the common operation — a registrar adds three late students and
+runs it again — so it has to be safely idempotent. Keying on the category instead would be
+stricter and would block a legitimate second charge; keying on the whole structure would be
+looser and would miss a duplicate arriving from two structures.
+
+**Cost.** A genuine second charge in a category a student already holds must be raised ad hoc,
+where it carries a mandatory note. That is the intended friction.
+
+**Verified by** the idempotency and re-raise cases in `backend/tests/integration/fees.test.ts`.
+
+## ADR-021: A negative balance is reported as a credit, never as a negative debt
+
+**Status:** accepted (Phase 4)
+
+`outstanding` is floored at zero. When the ledger nets in the family's favour the surplus appears
+in `creditBalance` instead. Exactly one of the two is ever non-zero.
+
+**Why.** A negative number in a money column has to be interpreted, and different readers
+interpret it differently — a report that sums outstanding balances across a school would quietly
+net one family's overpayment against another family's debt and understate what is owed. Naming
+the credit makes it a thing that can be reported on, refunded in Phase 5, and cleared, rather
+than a sign convention.
+
+**Cost.** Two fields where one might do, and both must be read to know the position.
+
+**Verified by** the credit-balance cases in `backend/tests/unit/balance.test.ts` and
+`backend/tests/integration/fees.test.ts`.
+
+## ADR-022: The financial ledger is the only source of a balance
+
+**Status:** accepted (Phase 4)
+
+Charges, discounts, scholarship awards, waivers and adjustments are _business records_. None of
+them is ever summed to produce a balance. Each posts a row to `financial_entries` when it takes
+effect, and a balance is `SUM(DEBIT) − SUM(CREDIT)` over those rows and nothing else.
+
+A record posts its entry at the moment it becomes real: a charge when raised, relief when
+approved. Rejected relief posts nothing. The ledger is insert-only — an entry that turns out to
+be wrong is never edited or deleted, an opposing entry is posted and linked through
+`reversal_of_entry_id`, so a reversal nets itself out arithmetically and reads as two facts.
+
+**Why.** A balance derived from five tables has five chances to double-count, and every relief
+type added later adds a term to the formula and another place to get it wrong. Entries make the
+formula closed. It also makes the Phase 5 seam trivial: a payment is a `PAYMENT`-sourced CREDIT,
+a new value in an existing set, and not a change to how money is counted.
+
+The unique indexes that permit only one opening entry per source record are what make
+double-posting structurally impossible rather than a rule the service has to remember — a retried
+request or two concurrent approvals hit the constraint.
+
+**Cost.** Two writes where one would do, and an extra table to reason about. A business record
+whose entry failed to post would be invisible in the balance, so every posting happens inside the
+same transaction as the record it belongs to.
+
+**Verified by** `backend/tests/unit/balance.test.ts` and the ledger cases in
+`backend/tests/integration/fees.test.ts`.
