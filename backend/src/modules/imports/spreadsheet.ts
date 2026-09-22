@@ -184,7 +184,9 @@ export async function readSheet(args: { fileName: string; buffer: Buffer }): Pro
     throw new SpreadsheetError('That file has no rows.');
   }
   if (rows.length === 1) {
-    throw new SpreadsheetError('That file has a header row but no student rows beneath it.');
+    // Worded without naming students: Phase 5 reads bank statements through the same
+    // function, and a bursar uploading a statement should not be told about students.
+    throw new SpreadsheetError('That file has a header row but no data rows beneath it.');
   }
 
   return rows;

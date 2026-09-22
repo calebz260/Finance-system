@@ -240,7 +240,9 @@ describe('preview', () => {
     const response = await preview(csv());
 
     expect(response.status).toBe(400);
-    expect(response.body.error.message).toMatch(/no student rows/i);
+    // Worded generically since Phase 5 reads bank statements through the same function: a
+    // bursar uploading a statement should not be told about students.
+    expect(response.body.error.message).toMatch(/no data rows/i);
   });
 
   it('lets a bursar preview, since looking writes nothing', async () => {

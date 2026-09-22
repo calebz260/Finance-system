@@ -12,6 +12,10 @@ import { FeesPage } from './pages/FeesPage';
 import { StudentFinancialsPage } from './pages/StudentFinancialsPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 import { NotFoundPage } from './pages/NotFoundPage';
+import { PaymentDetailPage } from './pages/PaymentDetailPage';
+import { PaymentsPage } from './pages/PaymentsPage';
+import { PayPage } from './pages/PayPage';
+import { ReconciliationPage } from './pages/ReconciliationPage';
 import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { SignInPage } from './pages/SignInPage';
 import { StudentDetailPage } from './pages/StudentDetailPage';
@@ -138,6 +142,51 @@ export function App(): React.JSX.Element {
           element={
             <RequireAuth permissions={[PermissionKey.CHARGE_READ]}>
               <StudentFinancialsPage />
+            </RequireAuth>
+          }
+        />
+
+        {/* Payments. The list and the detail screen are reachable two ways — by staff
+            with `payment.read`, and by a family with `own.financials_read` — because they
+            are the same records seen from two sides. The guard lets either through; the
+            server decides which payments each of them actually sees. */}
+        <Route
+          path="/payments"
+          element={
+            <RequireAuth
+              anyPermission={[PermissionKey.PAYMENT_READ, PermissionKey.OWN_FINANCIALS_READ]}
+            >
+              <PaymentsPage />
+            </RequireAuth>
+          }
+        />
+        {/* Before the :paymentId route, or "pay" is read as an id. */}
+        <Route
+          path="/payments/pay"
+          element={
+            <RequireAuth permissions={[PermissionKey.OWN_FINANCIALS_READ]}>
+              <PayPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/payments/:paymentId"
+          element={
+            <RequireAuth
+              anyPermission={[PermissionKey.PAYMENT_READ, PermissionKey.OWN_FINANCIALS_READ]}
+            >
+              <PaymentDetailPage />
+            </RequireAuth>
+          }
+        />
+
+        {/* Reconciliation is the school's view of its own bank account. No self-service
+            permission appears here, and none should: a family has no business in it. */}
+        <Route
+          path="/reconciliation"
+          element={
+            <RequireAuth permissions={[PermissionKey.RECONCILIATION_READ]}>
+              <ReconciliationPage />
             </RequireAuth>
           }
         />

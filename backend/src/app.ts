@@ -33,6 +33,7 @@ import { globalRateLimiter } from './middleware/rate-limit.js';
 import { requestContextMiddleware } from './middleware/request-context.js';
 import { requestLogger } from './middleware/request-logger.js';
 import { createProbeRouter } from './modules/health/health.routes.js';
+import { createPaymentWebhookRouter } from './modules/payments/payment.routes.js';
 import { createApiV1Router } from './routes/v1.js';
 import type { DatabaseProbe } from './modules/health/health.service.js';
 
@@ -95,6 +96,24 @@ export function createApp(options: CreateAppOptions = {}): Express {
   app.use(globalRateLimiter);
 
   app.use(compression());
+
+  // Provider callbacks, mounted **before** the JSON parser and given the raw bytes.
+  //
+  // A webhook signature covers the exact body the provider sent. Once `express.json` has
+  // parsed it, those bytes are gone: `JSON.stringify(req.body)` reproduces a body with
+  // the same meaning and, quite possibly, different bytes — different key order, no
+  // insignificant whitespace, a number re-rendered — and a signature checked against a
+  // re-serialisation is not checked against anything. Mounting the route here, with
+  // `express.raw`, is what makes verification real rather than decorative (Section 16).
+  //
+  // It still sits after the request context, the access log and the global rate limiter,
+  // so a callback is logged, correlated and throttled like every other request.
+  app.use(
+    `${API_BASE_PATH}/payment-webhooks`,
+    express.raw({ type: '*/*', limit: config.server.jsonBodyLimit }),
+    createPaymentWebhookRouter(),
+  );
+
   app.use(express.json({ limit: config.server.jsonBodyLimit }));
   // Auth refresh tokens are delivered as httpOnly cookies from Phase 2 onwards.
   app.use(cookieParser());

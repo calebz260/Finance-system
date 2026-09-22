@@ -34,6 +34,8 @@ pids/
 # Uploaded files (proof-of-payment, bank statements) are never committed
 uploads/
 storage/local/
+# The default UPLOAD_STORAGE_PATH, and where the test suite writes the files it uploads.
+var/
 
 # Prisma local artifacts
 prisma/*.db

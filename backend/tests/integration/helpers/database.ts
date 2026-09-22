@@ -20,6 +20,18 @@ const DOMAIN_TABLES = [
   'mfa_recovery_codes',
   'refresh_tokens',
   'sessions',
+  // Reconciliation, before payments: a statement line points at the payment it was
+  // attributed to.
+  'bank_statement_lines',
+  'bank_statement_imports',
+  // Payments, before the ledger: a financial entry points at a payment, and a payment
+  // points at an account, a student and a period. The webhook log goes first because it
+  // references both a payment and one of its attempts.
+  'payment_webhook_events',
+  'payment_evidence',
+  'payment_status_history',
+  'payment_transactions',
+  'payments',
   // Financial tables, listed before the academic ones they reference. The ledger goes
   // first: an entry points at a charge, an account and a relief record, so emptying it
   // last would rely on CASCADE arriving from three directions.

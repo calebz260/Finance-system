@@ -867,6 +867,504 @@ export interface ChargeRunResult {
   readonly totalAmount: string;
 }
 
+/* ---------------------------------------------------------------- payments */
+
+/**
+ * How the money physically moved.
+ *
+ * Deliberately separate from `PaymentVerificationMethodValue` below, which says how the
+ * school came to *believe* it moved. The two are independent: a bank transfer might be
+ * confirmed by a provider callback at one bank and by a bursar reading a statement at
+ * another, and conflating them would mean the verification rules changed whenever a
+ * bank's integration did.
+ */
+export type PaymentMethodValue =
+  'MOBILE_MONEY' | 'BANK_TRANSFER' | 'BANK_DEPOSIT' | 'CASH' | 'CHEQUE';
+
+/**
+ * What has to happen before a payment may credit the ledger.
+ *
+ *  - `PROVIDER` — a payment provider confirms it, and the confirmation is verified
+ *    server-side against the provider's own record before anything is credited.
+ *  - `MANUAL` — an authorised bursar confirms it against a bank statement or the cash
+ *    they are holding. A first-class path, not an exception path (ADR-003).
+ */
+export type PaymentVerificationMethodValue = 'PROVIDER' | 'MANUAL';
+
+/**
+ * A payment's lifecycle.
+ *
+ * `SUCCESSFUL` is the only status that has credited the ledger, and it is reached only
+ * through server-side verification. The two undo states are distinct on purpose:
+ * `REVERSED` means the money never really arrived (a bank reversal, a claim confirmed in
+ * error); `REFUNDED` means it arrived and was sent back. Both post a compensating ledger
+ * entry and neither deletes anything.
+ */
+export type PaymentStatusValue =
+  | 'PENDING'
+  | 'PROCESSING'
+  | 'SUCCESSFUL'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'REQUIRES_REVIEW'
+  | 'REVERSED'
+  | 'REFUNDED';
+
+/** The channels the school collects through. */
+export type PaymentProviderKeyValue =
+  'SANDBOX' | 'BANK_OF_KIGALI' | 'ZIGAMA_CSS' | 'UMWARIMU_SACCO';
+
+/** One attempt against a provider. `UNKNOWN` is a real outcome, not a missing one. */
+export type PaymentTransactionStatusValue =
+  'INITIATED' | 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'TIMED_OUT' | 'UNKNOWN';
+
+/** Who or what caused a status transition. */
+export type PaymentStatusChangeSourceValue =
+  'USER' | 'PROVIDER_WEBHOOK' | 'PROVIDER_QUERY' | 'SYSTEM';
+
+export type PaymentEvidenceKindValue =
+  'BANK_SLIP' | 'TRANSFER_CONFIRMATION' | 'REMITTANCE_ADVICE' | 'OTHER';
+
+/**
+ * The payment status machine, as data.
+ *
+ * Declared here, once, so the server enforces and the browser renders from the same
+ * table — a screen offering a "Verify" button for a payment the API would refuse is a
+ * bug report waiting to happen. The server still checks; this only decides what is
+ * offered.
+ *
+ * The rules that matter:
+ *
+ *  - Nothing leaves a terminal state except `SUCCESSFUL`, which may be undone by a
+ *    reversal or a refund. A repeated callback arriving after a payment already failed
+ *    therefore cannot resurrect it.
+ *  - `PROCESSING` cannot be cancelled. Once a provider has the request, the school does
+ *    not get to decide the money did not move; it waits for the confirmation or the
+ *    failure.
+ *  - `REQUIRES_REVIEW` is reachable from both live states and leads to a decision by a
+ *    person. It is where a mismatch goes instead of being silently resolved.
+ */
+export const PAYMENT_STATUS_TRANSITIONS: Readonly<
+  Record<PaymentStatusValue, readonly PaymentStatusValue[]>
+> = Object.freeze({
+  PENDING: ['PROCESSING', 'SUCCESSFUL', 'FAILED', 'CANCELLED', 'REQUIRES_REVIEW'],
+  PROCESSING: ['SUCCESSFUL', 'FAILED', 'REQUIRES_REVIEW'],
+  REQUIRES_REVIEW: ['SUCCESSFUL', 'FAILED', 'CANCELLED'],
+  SUCCESSFUL: ['REVERSED', 'REFUNDED'],
+  FAILED: [],
+  CANCELLED: [],
+  REVERSED: [],
+  REFUNDED: [],
+});
+
+/** True when `to` is a permitted next status for `from`. */
+export function canTransitionPayment(from: PaymentStatusValue, to: PaymentStatusValue): boolean {
+  return PAYMENT_STATUS_TRANSITIONS[from].includes(to);
+}
+
+/** True when a payment can never change status again. */
+export function isTerminalPaymentStatus(status: PaymentStatusValue): boolean {
+  return PAYMENT_STATUS_TRANSITIONS[status].length === 0;
+}
+
+/** True when this status has credited the ledger. Exactly one status has. */
+export function paymentHasCredited(status: PaymentStatusValue): boolean {
+  return status === 'SUCCESSFUL' || status === 'REVERSED' || status === 'REFUNDED';
+}
+
+/**
+ * A payment channel as offered to the person paying.
+ *
+ * `isAvailable` and `unavailableReason` are part of the contract rather than something
+ * the browser infers: a channel whose provider integration is not yet confirmed must say
+ * so plainly instead of presenting a button that fails (Section 40).
+ */
+export interface PaymentMethodOption {
+  readonly method: PaymentMethodValue;
+  readonly label: string;
+  readonly verificationMethod: PaymentVerificationMethodValue;
+  readonly providerKey: PaymentProviderKeyValue | null;
+  readonly isAvailable: boolean;
+  /** Why this channel cannot be used right now. Null when it can. */
+  readonly unavailableReason: string | null;
+  /** Whether a claim through this channel must carry proof of payment. */
+  readonly requiresEvidence: boolean;
+  /** What the payer has to do, for a channel the school reconciles by hand. */
+  readonly instructions: string | null;
+}
+
+/** One provider attempt, as shown to finance staff. */
+export interface PaymentTransactionSummary {
+  readonly id: string;
+  readonly providerKey: PaymentProviderKeyValue;
+  /** The reference the school sent to the provider. */
+  readonly internalReference: string;
+  /** The provider's own identifier, once it has given one. */
+  readonly providerTransactionId: string | null;
+  readonly requestedAmount: string;
+  /** What the provider says was actually taken. Null until it confirms. */
+  readonly confirmedAmount: string | null;
+  readonly currency: string;
+  readonly status: PaymentTransactionStatusValue;
+  readonly failureCode: string | null;
+  readonly failureMessage: string | null;
+  readonly initiatedAt: string;
+  readonly completedAt: string | null;
+}
+
+/** One preserved status transition. */
+export interface PaymentStatusHistoryEntry {
+  readonly id: string;
+  readonly fromStatus: PaymentStatusValue | null;
+  readonly toStatus: PaymentStatusValue;
+  readonly source: PaymentStatusChangeSourceValue;
+  readonly reason: string | null;
+  readonly actorName: string | null;
+  readonly occurredAt: string;
+}
+
+/**
+ * Proof attached to a manual claim.
+ *
+ * Carries no URL: the file is fetched from `/payments/:id/evidence/:evidenceId/file`
+ * with the caller's own credentials, so a link cannot be forwarded to someone who may
+ * not see it.
+ */
+export interface PaymentEvidenceSummary {
+  readonly id: string;
+  readonly kind: PaymentEvidenceKindValue;
+  readonly fileName: string;
+  readonly contentType: string;
+  readonly byteSize: number;
+  /** Lets a reviewer tell a re-uploaded duplicate from a genuinely different document. */
+  readonly checksum: string;
+  readonly uploadedByName: string;
+  readonly uploadedAt: string;
+  /** False once a later upload superseded it. Superseded evidence is never deleted. */
+  readonly isCurrent: boolean;
+}
+
+/**
+ * A payment, in the shape every list and detail screen reads.
+ *
+ * Every monetary field is a decimal string. Nothing here is a balance: a payment's
+ * effect on what a family owes is the ledger entry it posted, and that is reported by
+ * `StudentBalance` (ADR-022).
+ */
+export interface PaymentSummary {
+  readonly id: string;
+  /** e.g. `PAY-2026-000001234`. What a parent quotes on the phone. */
+  readonly reference: string;
+  readonly studentId: string;
+  readonly studentNumber: string;
+  readonly studentName: string;
+  readonly amount: string;
+  readonly currency: string;
+  readonly method: PaymentMethodValue;
+  readonly verificationMethod: PaymentVerificationMethodValue;
+  readonly providerKey: PaymentProviderKeyValue | null;
+  readonly status: PaymentStatusValue;
+  readonly academicYearId: string;
+  readonly academicYearName: string;
+  readonly termId: string | null;
+  readonly termName: string | null;
+  readonly payerName: string;
+  /** Provider or bank reference as supplied by the payer or the provider. */
+  readonly externalReference: string | null;
+  readonly failureReason: string | null;
+  readonly initiatedByName: string;
+  readonly initiatedAt: string;
+  readonly completedAt: string | null;
+  readonly verifiedByName: string | null;
+  readonly verifiedAt: string | null;
+  readonly reversedByName: string | null;
+  readonly reversedAt: string | null;
+  readonly reversalReason: string | null;
+  /** The ledger CREDIT this payment posted, once it has one. */
+  readonly ledgerEntryId: string | null;
+  readonly evidenceCount: number;
+  readonly version: number;
+}
+
+/** A payment with everything a reviewer needs in one response. */
+export interface PaymentDetail {
+  readonly payment: PaymentSummary;
+  readonly transactions: readonly PaymentTransactionSummary[];
+  readonly statusHistory: readonly PaymentStatusHistoryEntry[];
+  readonly evidence: readonly PaymentEvidenceSummary[];
+  /** The ledger lines this payment produced: its credit, and any compensating entry. */
+  readonly entries: readonly FinancialEntrySummary[];
+}
+
+/**
+ * What a payer gets back from initiation.
+ *
+ * `payment.status` is authoritative and server-derived. `providerInstruction` carries
+ * whatever the payer now has to do — approve a prompt on their handset, or deposit at a
+ * branch and submit the slip — and is null when there is nothing left to do.
+ */
+export interface PaymentInitiationResult {
+  readonly payment: PaymentSummary;
+  readonly transaction: PaymentTransactionSummary | null;
+  readonly providerInstruction: string | null;
+  /**
+   * True when this response replayed an existing payment because the idempotency key had
+   * already been used. Nothing new was created.
+   */
+  readonly replayed: boolean;
+}
+
+/**
+ * A student a signed-in parent or guardian may pay for.
+ *
+ * The outstanding figure is the ledger-derived balance, computed server-side, so the
+ * amount a parent is offered to pay is the amount the system believes is owed.
+ */
+export interface PayableStudent {
+  readonly studentId: string;
+  readonly studentNumber: string;
+  readonly studentName: string;
+  readonly relationship: GuardianRelation;
+  readonly currency: string;
+  readonly outstanding: string;
+  readonly creditBalance: string;
+  readonly canViewFinancials: boolean;
+  readonly canInitiatePayments: boolean;
+}
+
+/**
+ * What a bursar's decision on a payment did.
+ *
+ * `outcome` is deliberately richer than "ok": a confirmation can credit, can find the
+ * payment already credited by a provider callback that arrived first, or can discover
+ * that the statement and the claim disagree — and the third case must not be reported as
+ * a success. The screen branches on this, never on the message text.
+ */
+export interface PaymentVerificationResult {
+  readonly payment: PaymentSummary;
+  readonly outcome: 'CREDITED' | 'ALREADY_CREDITED' | 'HELD_FOR_REVIEW' | 'FAILED';
+  /** The ledger CREDIT, when one exists. Null when nothing was credited. */
+  readonly ledgerEntryId: string | null;
+  /** One sentence, safe to show the verifier. */
+  readonly message: string;
+}
+
+/** What a reversal or refund did. */
+export interface PaymentReversalResult {
+  readonly payment: PaymentSummary;
+  readonly status: PaymentStatusValue;
+  /**
+   * Whether the opposing ledger entry was posted. False would mean a successful payment
+   * had no live credit to undo, which is a fault worth surfacing rather than hiding.
+   */
+  readonly compensatingEntryPosted: boolean;
+  readonly message: string;
+}
+
+/* ---------------------------------------------------------- reconciliation */
+
+/**
+ * Which way money moved on a bank statement line.
+ *
+ * Kept separate from the ledger's `EntryDirection` on purpose: a DEBIT on a student's
+ * account and a debit on the school's bank account are opposite things, and one enum for
+ * both would make reconciliation code impossible to read.
+ */
+export type BankStatementDirectionValue = 'MONEY_IN' | 'MONEY_OUT';
+
+/** What has been decided about one statement line. */
+export type StatementLineMatchStatusValue = 'UNMATCHED' | 'MATCHED' | 'IGNORED' | 'AMBIGUOUS';
+
+/** One line of an imported statement, as the reconciliation screen reads it. */
+export interface StatementLineSummary {
+  readonly id: string;
+  readonly importId: string;
+  /** 1-based, counting the header, so it matches the row in the bursar's file. */
+  readonly lineNumber: number;
+  /** `YYYY-MM-DD`. The bank's value date, never rewritten. */
+  readonly valueDate: string;
+  readonly narrative: string;
+  readonly reference: string | null;
+  readonly amount: string;
+  readonly currency: string;
+  readonly direction: BankStatementDirectionValue;
+  readonly matchStatus: StatementLineMatchStatusValue;
+  readonly matchedPaymentId: string | null;
+  readonly matchedPaymentReference: string | null;
+  readonly matchedStudentName: string | null;
+  /** Null when the automatic pass matched it, which is itself worth showing. */
+  readonly matchedByName: string | null;
+  readonly matchedAt: string | null;
+  readonly matchNote: string | null;
+  readonly version: number;
+}
+
+/**
+ * A payment a line might belong to.
+ *
+ * Suggestions are computed per request and never stored: a stored suggestion would go
+ * stale the moment the payment it names is verified or cancelled, and a bursar acting on
+ * a stale suggestion is exactly the failure this is meant to prevent.
+ *
+ * `amountMatches` is separate from the rest because it decides whether the match may be
+ * made at all: a line and a payment of different amounts are not the same money.
+ */
+export interface StatementMatchSuggestion {
+  readonly paymentId: string;
+  readonly reference: string;
+  readonly studentId: string;
+  readonly studentName: string;
+  readonly studentNumber: string;
+  readonly amount: string;
+  readonly status: PaymentStatusValue;
+  readonly payerName: string;
+  readonly initiatedAt: string;
+  /** Why this payment is being suggested, in words a bursar can check. */
+  readonly reason: string;
+  readonly amountMatches: boolean;
+}
+
+/** One imported statement. */
+export interface StatementImportSummary {
+  readonly id: string;
+  readonly provider: PaymentProviderKeyValue;
+  readonly accountLabel: string | null;
+  readonly fileName: string;
+  readonly periodStart: string | null;
+  readonly periodEnd: string | null;
+  readonly lineCount: number;
+  readonly totalIn: string;
+  readonly totalOut: string;
+  readonly currency: string;
+  readonly importedByName: string;
+  readonly importedAt: string;
+  readonly notes: string | null;
+  /** How far through the work this statement is. Counted from the lines, not stored. */
+  readonly matchedCount: number;
+  readonly unmatchedCount: number;
+  readonly ignoredCount: number;
+  readonly ambiguousCount: number;
+}
+
+/**
+ * The reconciliation worklist: lines awaiting a decision, and what each might belong to.
+ *
+ * Suggestions travel with the lines rather than being fetched per row, because a screen
+ * that asked for candidates one line at a time would make a hundred requests to render a
+ * month's statement — and a bursar would be reading the first row while the last was still
+ * loading.
+ */
+export interface StatementLineWorklist {
+  readonly lines: readonly StatementLineSummary[];
+  /** Keyed by statement line id. Absent for a line with nothing to suggest. */
+  readonly suggestions: Readonly<Record<string, readonly StatementMatchSuggestion[]>>;
+}
+
+/** A statement with its lines and, for each one, what it might belong to. */
+export interface StatementImportDetail {
+  readonly statement: StatementImportSummary;
+  readonly lines: readonly StatementLineSummary[];
+  /** Keyed by statement line id. Absent for a line with nothing to suggest. */
+  readonly suggestions: Readonly<Record<string, readonly StatementMatchSuggestion[]>>;
+}
+
+/** One row of a statement as the preview reports it, before anything is stored. */
+export interface StatementPreviewLine {
+  readonly lineNumber: number;
+  readonly valueDate: string | null;
+  readonly narrative: string;
+  readonly reference: string | null;
+  readonly amount: string | null;
+  readonly direction: BankStatementDirectionValue | null;
+  /** What is wrong with the row, if anything. Empty for a row that will import. */
+  readonly errors: readonly string[];
+}
+
+/**
+ * What importing a file would do. Writes nothing.
+ *
+ * The same shape as the student import's preview, and for the same reason: a bursar sees
+ * every problem in the file, against the row number they can see on screen, before
+ * anything is stored (ADR-015).
+ */
+export interface StatementImportPreview {
+  readonly fileName: string;
+  readonly currency: string;
+  readonly totalRows: number;
+  readonly validRows: number;
+  readonly invalidRows: number;
+  readonly moneyInCount: number;
+  readonly moneyOutCount: number;
+  readonly totalIn: string;
+  readonly totalOut: string;
+  readonly periodStart: string | null;
+  readonly periodEnd: string | null;
+  /** True when this exact file has already been imported. */
+  readonly alreadyImported: boolean;
+  readonly lines: readonly StatementPreviewLine[];
+  readonly linesTruncated: boolean;
+}
+
+/** What an import actually did. */
+export interface StatementImportResult {
+  readonly statement: StatementImportSummary;
+  /** Lines the automatic pass attributed: a quoted reference and an equal amount. */
+  readonly automaticallyMatched: number;
+  /** Lines with more than one candidate, left for a person. */
+  readonly ambiguous: number;
+}
+
+/**
+ * Where reconciliation stands for a period.
+ *
+ * Both sides are reported, because either one alone hides a problem: statement lines
+ * nobody has attributed are money the school has but cannot explain, and live payments
+ * with no statement line are claims the bank has not confirmed.
+ */
+export interface ReconciliationSummary {
+  readonly from: string | null;
+  readonly to: string | null;
+  readonly currency: string;
+  /**
+   * Money-**in** lines only, across every decision.
+   *
+   * Money out is excluded throughout this summary on purpose: a bank charge or an outward
+   * transfer is never a student's payment, so counting it as reconcilable work would make
+   * the figures below look worse than the position actually is.
+   */
+  readonly statementLines: number;
+  readonly matchedLines: number;
+  readonly unmatchedLines: number;
+  readonly ambiguousLines: number;
+  readonly ignoredLines: number;
+  readonly matchedTotal: string;
+  readonly unmatchedTotal: string;
+  /** Payments awaiting verification that no statement line has been matched to. */
+  readonly unreconciledPayments: number;
+  readonly unreconciledPaymentTotal: string;
+}
+
+/** What matching a line to a payment did. */
+export interface StatementMatchResult {
+  readonly line: StatementLineSummary;
+  /** Present when the match also verified the payment and credited the ledger. */
+  readonly payment: PaymentSummary | null;
+  readonly credited: boolean;
+  readonly message: string;
+}
+
+/**
+ * The answer to a provider callback.
+ *
+ * Deliberately uninformative about *why* a callback was not accepted. A forged callback
+ * must not learn whether it failed on the signature, the timestamp or the reference —
+ * that is a verification oracle. The detail is recorded in `payment_webhook_events` and
+ * the audit log, where the school can read it and an attacker cannot (Section 16).
+ */
+export interface WebhookAcknowledgement {
+  readonly received: true;
+}
+
 /* ----------------------------------------------------------------- health check */
 
 export type HealthStatus = 'ok' | 'degraded' | 'down';

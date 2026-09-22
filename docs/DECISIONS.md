@@ -319,7 +319,7 @@ cannot see their child.
 
 ## ADR-017: Import files are parsed in memory and never written to disk
 
-**Status:** accepted (Phase 3)
+**Status:** accepted (Phase 3), narrowed by ADR-027 (Phase 5)
 
 Uploads are held in memory by `multer.memoryStorage`, capped at 5 MB and one file, parsed, and
 discarded when the request ends.
@@ -333,6 +333,10 @@ record the school needs to keep.
 
 **Cost.** A hard size limit, and no server-side retry of a failed upload. Both are acceptable
 for a file that is re-exported from a spreadsheet in seconds.
+
+**Phase 5 outcome.** The decision held for the files it was about. Student imports and bank
+statements are still parsed in memory and discarded; only proof of payment, which is the
+evidence behind a credit rather than a means of getting data in, is stored. See ADR-027.
 
 ---
 
@@ -446,3 +450,164 @@ same transaction as the record it belongs to.
 
 **Verified by** `backend/tests/unit/balance.test.ts` and the ledger cases in
 `backend/tests/integration/fees.test.ts`.
+
+---
+
+## ADR-023: A payment is credited only by server-side verification, and only once
+
+**Status:** accepted (Phase 5)
+
+`SUCCESSFUL` is the only payment status that has credited the ledger, and a payment reaches it
+through exactly one function — `finalisePayment` — whether a provider callback, a status query
+or a bursar's confirmation asked for it. That function makes the payment successful **and**
+posts its ledger CREDIT in one transaction, and compares the confirmed amount and currency
+against the school's own record before either happens.
+
+A double credit is prevented three independent ways: a `SELECT … FOR UPDATE` row lock, a
+conditional `UPDATE` from the finalisable statuses only, and the partial unique index
+`financial_entries_one_opening_per_payment`.
+
+**Why.** Duplicate delivery is the normal behaviour of payment providers, not an edge case, so
+one defence is not enough. The first two are application behaviour and the third is not: a
+future code path that forgets to lock still cannot double-credit. Sharing one finalisation
+function across the callers matters for a different reason — the checks that guard a credit must
+not be able to differ depending on who asked, and two implementations would eventually diverge
+in favour of whichever was more convenient.
+
+Crediting the _claimed_ figure rather than comparing it would mean a compromised webhook secret,
+or a provider bug, could credit any amount at all, and an under-collection would silently write
+off the difference. A mismatch is parked in `REQUIRES_REVIEW` with both figures recorded.
+
+**Cost.** Three mechanisms to understand instead of one, and a status a person has to resolve.
+`REQUIRES_REVIEW` is real work for a bursar — which is the point: the alternative is a system
+that quietly decides how much a family owes.
+
+**Verified by** the duplicate-callback, amount-mismatch and repeated-verification cases in
+`backend/tests/integration/payments.test.ts`.
+
+---
+
+## ADR-024: A terminal payment status is final, and a repeat is not an error
+
+**Status:** accepted (Phase 5)
+
+The transition table lives in `shared/src/api.ts` and is enforced by `payment.status.ts`.
+`FAILED`, `CANCELLED`, `REVERSED` and `REFUNDED` have no outgoing transitions. A transition to
+the status a payment already holds is classified as _already applied_ — neither a fresh event
+nor a fault.
+
+**Why.** Both halves are about repeated and late messages rather than the happy path. A callback
+arriving after a timeout was recorded as a failure must not resurrect the payment and credit it,
+which is what makes a provider's retry policy harmless. And a duplicate callback reporting
+success for an already-successful payment is ordinary provider behaviour: treating it as an error
+would 500 on a retry, while treating it as new would credit twice. `classifyTransition` is what
+tells those two cases apart, and it is why the webhook path can answer 200 from the existing
+record while a person pressing a button twice is told their action was already applied.
+
+`PROCESSING` deliberately cannot be cancelled: once a provider has the request, the school does
+not get to decide the money did not move.
+
+**Cost.** A payment that genuinely needs reopening cannot be. It is undone by a reversal, which
+is a named decision with its own permission and its own ledger entry — the behaviour an auditor
+would want anyway.
+
+**Verified by** `backend/tests/unit/payment-status.test.ts` and the late-callback case in
+`backend/tests/integration/payments.test.ts`.
+
+---
+
+## ADR-025: A webhook is authenticated by a signature over the raw bytes, and recorded before it is acted on
+
+**Status:** accepted (Phase 5)
+
+The provider webhook route is mounted in `app.ts` **ahead of the JSON body parser** and reads
+`express.raw`. The signature covers `"<timestamp>.<raw body>"`, the secret is chosen by the
+provider named in the _path_, comparison is timing-safe, and a signed timestamp outside a narrow
+window is refused as a replay. The event is inserted into `payment_webhook_events` — whose
+`(provider_key, event_id)` is unique — before the callback is processed, and rejections are
+stored too.
+
+**Why.** A signature covers the bytes the provider sent. Once `express.json` has parsed them
+those bytes are gone, and `JSON.stringify(req.body)` reproduces a body with the same meaning and
+possibly different bytes, so a signature checked against a re-serialisation is not checked
+against anything. Letting the body name its own key would let an unauthenticated body choose the
+key that authenticates it. A signature over the body alone is replayable forever, so the
+timestamp goes inside the digest. And recording the event first is the whole mechanism behind
+idempotent handling: a re-delivery loses the insert and is answered from the first delivery's
+record rather than processed again.
+
+Rejections are stored because one bad signature is a misconfiguration and a stream of them is
+somebody forging confirmations — a distinction that only exists if the failures were written
+down. The sender is told none of it: every refusal is the same fixed 401, because "signature
+bad" versus "timestamp stale" versus "reference unknown" is a verification oracle.
+
+**Cost.** The webhook route cannot use the shared JSON parsing, and its body arrives as a
+`Buffer` that each adapter parses itself. Rejected callbacks accumulate rows, which Phase 11's
+retention work will have to age out.
+
+**Verified by** the forged-signature, stale-timestamp, duplicate-delivery and unknown-reference
+cases in `backend/tests/integration/payments.test.ts`.
+
+---
+
+## ADR-026: Statement matching is automatic only when it is certain, and never destructive
+
+**Status:** accepted (Phase 5)
+
+The automatic pass attributes a statement line to a payment only when the payment's own
+reference is quoted on the line **and** the amounts are exactly equal. Everything else becomes a
+ranked _suggestion_, each carrying the reason it was offered; several equally plausible
+candidates are recorded as `AMBIGUOUS` rather than resolved. Matching a line and crediting the
+payment are separate acts: the second additionally requires `payment.verify_manual` and the same
+separation of duties as verification by hand. A line that has already credited a payment cannot
+be detached from it.
+
+**Why.** The two failure modes are not symmetric. A missed match costs a bursar a minute of
+reading; a wrong match credits the wrong family, leaves the right one still owing, and is
+discovered weeks later by a parent holding a receipt. A reference quoted with a _different_
+amount is the most useful suggestion there is and the least safe thing to apply automatically —
+either the payer paid a different amount or the line is not theirs, and both need a person.
+
+Detaching a line from a credited payment would leave the credit with nothing behind it.
+Reversing the payment is the supported correction, and it posts a compensating ledger entry
+rather than erasing anything.
+
+**Cost.** A bursar works a list rather than reading a number. Where a bank's export quotes no
+reference — which is common — almost every line needs a person, which is why suggestions carry
+their reasoning and an amount-match flag rather than just a name.
+
+**Verified by** `backend/tests/unit/matching.test.ts` and
+`backend/tests/integration/reconciliation.test.ts`.
+
+---
+
+## ADR-027: Proof of payment is stored; a bank statement is not
+
+**Status:** accepted (Phase 5)
+
+Uploaded proof of payment is written to disk under an opaque, server-generated key, outside any
+web-servable path, and served only through an authenticated endpoint that re-checks who is
+asking and audits every download. An uploaded bank statement is parsed in memory and discarded,
+keeping only its SHA-256 so the same export cannot be imported twice.
+
+**Why.** The two files answer different questions. A bank slip is the evidence behind one credit
+to one family's account and has to still be there when somebody asks about that credit years
+later. A statement is a transport for rows that are themselves stored; keeping the file as well
+would hold every family's transactions in a second place, with its own retention and access
+problem, for no additional answer.
+
+This narrows ADR-017 rather than reversing it: import files and statements are still parsed in
+memory and discarded, and only evidence is kept.
+
+The stored name is never the uploaded filename, which is attacker-controlled, and the content
+type comes from the file's magic bytes rather than the browser's claim. Scan state is recorded
+as `SKIPPED` when no scanner is configured, so a reviewer can tell an unscanned file from a
+clean one instead of assuming.
+
+**Cost.** A storage volume to back up, and a real one: losing it loses the evidence behind
+credits that remain in the ledger. An orphaned file is possible when a database write fails
+after the bytes are written — that is the right way round, because a row pointing at a missing
+file is a reviewer clicking Download on evidence the system claims to hold.
+
+**Verified by** `backend/tests/unit/file-storage.test.ts` and the evidence cases in
+`backend/tests/integration/payments.test.ts`.

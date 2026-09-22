@@ -12,11 +12,16 @@ export const STUDENT_ID_PATTERN = /^STU-\d{4}-\d{5}$/;
 /** e.g. `RCP-2026-000001234` */
 export const RECEIPT_NUMBER_PATTERN = /^RCP-\d{4}-\d{9}$/;
 
+/** e.g. `PAY-2026-000001234` */
+export const PAYMENT_REFERENCE_PATTERN = /^PAY-\d{4}-\d{9}$/;
+
 export const STUDENT_ID_PREFIX = 'STU';
 export const RECEIPT_NUMBER_PREFIX = 'RCP';
+export const PAYMENT_REFERENCE_PREFIX = 'PAY';
 
 export const STUDENT_ID_SEQUENCE_WIDTH = 5;
 export const RECEIPT_NUMBER_SEQUENCE_WIDTH = 9;
+export const PAYMENT_REFERENCE_SEQUENCE_WIDTH = 9;
 
 function pad(sequence: number, width: number): string {
   if (!Number.isInteger(sequence) || sequence < 1) {
@@ -46,12 +51,29 @@ export function formatReceiptNumber(year: number, sequence: number): string {
   return `${RECEIPT_NUMBER_PREFIX}-${String(year)}-${pad(sequence, RECEIPT_NUMBER_SEQUENCE_WIDTH)}`;
 }
 
+/**
+ * Build a payment reference from the year and a per-year sequence number.
+ *
+ * This is the identifier a parent quotes to the bursar's office and the one a
+ * reconciliation report will join on, so it comes from the same atomic per-year counter
+ * as a Student ID rather than from a row's UUID: a reference has to be readable over the
+ * phone, and it must never be issued twice.
+ */
+export function formatPaymentReference(year: number, sequence: number): string {
+  assertYear(year);
+  return `${PAYMENT_REFERENCE_PREFIX}-${String(year)}-${pad(sequence, PAYMENT_REFERENCE_SEQUENCE_WIDTH)}`;
+}
+
 export function isValidStudentId(value: string): boolean {
   return STUDENT_ID_PATTERN.test(value);
 }
 
 export function isValidReceiptNumber(value: string): boolean {
   return RECEIPT_NUMBER_PATTERN.test(value);
+}
+
+export function isValidPaymentReference(value: string): boolean {
+  return PAYMENT_REFERENCE_PATTERN.test(value);
 }
 
 export interface ParsedSequentialId {

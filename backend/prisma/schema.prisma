@@ -212,8 +212,10 @@ enum FinancialEntrySource {
   SCHOLARSHIP
   WAIVER
   ADJUSTMENT
-  /// Phase 5. Present so the ledger's set of sources is closed and a payment is a new
-  /// value rather than a new concept; nothing in Phase 4 writes one.
+  /// A verified payment (Phase 5). Added as a *value* rather than as a new concept,
+  /// which is what made introducing payments a new entry source instead of a change to
+  /// how money is counted: a payment CREDITs, a reversal or refund posts the opposing
+  /// DEBIT, and the balance formula is untouched.
   PAYMENT
 
   @@map("financial_entry_source")
@@ -271,12 +273,161 @@ enum AuditResult {
   @@map("audit_result")
 }
 
+/// -------------------------------------------------------------- payments (Phase 5)
+
+/// How the money physically moved.
+///
+/// Deliberately independent of `PaymentVerificationMethod`: the same bank transfer may be
+/// confirmed by a provider callback at one bank and by a bursar reading a statement at
+/// another, and collapsing the two would mean the verification rules changed whenever a
+/// bank's integration did.
+enum PaymentMethod {
+  /// Mobile wallet push/pull, provider-confirmed where an adapter exists.
+  MOBILE_MONEY
+  /// Transfer into the school's collection account.
+  BANK_TRANSFER
+  /// Over-the-counter deposit at a branch or agent.
+  BANK_DEPOSIT
+  /// Handed over at the bursar's office.
+  CASH
+  CHEQUE
+
+  @@map("payment_method")
+}
+
+/// What has to happen before a payment may credit the ledger (ADR-003).
+enum PaymentVerificationMethod {
+  /// A provider confirms it, and the confirmation is verified against the provider's own
+  /// record server-side before anything is credited.
+  PROVIDER
+  /// An authorised bursar confirms it against a statement or the cash in hand. A
+  /// first-class path, not an exception path — it may carry most of the real volume.
+  MANUAL
+
+  @@map("payment_verification_method")
+}
+
+/// A payment's lifecycle.
+///
+/// `SUCCESSFUL` is the only status that has credited the ledger, and it is reached only
+/// through server-side verification. Permitted transitions are declared once, in
+/// `shared/src/api.ts`, and enforced by `payment.status.ts`; a status column alone cannot
+/// express "never backwards out of a terminal state", which is the rule that stops a
+/// repeated callback resurrecting a failed payment.
+///
+/// The two undo states are distinct on purpose: REVERSED means the money never really
+/// arrived, REFUNDED means it arrived and was sent back. Both post a compensating ledger
+/// entry; neither deletes anything.
+enum PaymentStatus {
+  /// Created. A provider payment is awaiting the provider; a manual claim is awaiting a
+  /// bursar. Nothing has been credited.
+  PENDING
+  /// The provider has accepted the request and is working on it.
+  PROCESSING
+  /// Verified and credited. The one status that has moved the balance.
+  SUCCESSFUL
+  FAILED
+  /// Withdrawn before it completed.
+  CANCELLED
+  /// Something did not add up — an amount or currency mismatch, an unrecognised
+  /// reference. Parked for a person rather than resolved silently (Section 20).
+  REQUIRES_REVIEW
+  /// Credited, then found not to have arrived. The original is preserved.
+  REVERSED
+  /// Credited, then genuinely returned to the payer.
+  REFUNDED
+
+  @@map("payment_status")
+}
+
+/// The channels the school collects through.
+///
+/// `SANDBOX` is a local simulator used in development and tests. It is not a bank, it
+/// makes no outbound calls, and it is refused outright in production. The three named
+/// Rwandan channels exist as values so a payment can record which one it came through
+/// even while that channel is reconciled by hand; see docs/OPEN-QUESTIONS.md #1 and #2.
+enum PaymentProviderKey {
+  SANDBOX
+  BANK_OF_KIGALI
+  ZIGAMA_CSS
+  UMWARIMU_SACCO
+
+  @@map("payment_provider_key")
+}
+
+/// One attempt against a provider.
+///
+/// `UNKNOWN` is a real outcome rather than a missing one: a timed-out request may still
+/// have taken the payer's money, so it must be representable and must not be treated as
+/// a failure.
+enum PaymentTransactionStatus {
+  INITIATED
+  PENDING
+  SUCCEEDED
+  FAILED
+  TIMED_OUT
+  UNKNOWN
+
+  @@map("payment_transaction_status")
+}
+
+/// Who or what caused a status transition.
+enum PaymentStatusChangeSource {
+  USER
+  PROVIDER_WEBHOOK
+  PROVIDER_QUERY
+  SYSTEM
+
+  @@map("payment_status_change_source")
+}
+
+/// What a piece of proof attached to a manual claim actually is.
+enum PaymentEvidenceKind {
+  BANK_SLIP
+  TRANSFER_CONFIRMATION
+  REMITTANCE_ADVICE
+  OTHER
+
+  @@map("payment_evidence_kind")
+}
+
+/// Whether an uploaded file's bytes were checked for malicious content.
+///
+/// `SKIPPED` is recorded rather than implied when no scanner is configured, because a
+/// reviewer opening a bank slip needs to know which of the two it is. Phase 5 ships the
+/// port and the state; a scanner is an external dependency the school has to provide.
+enum ContentScanState {
+  PENDING
+  CLEAN
+  INFECTED
+  SKIPPED
+
+  @@map("content_scan_state")
+}
+
+/// Outcome of verifying an inbound provider callback.
+enum WebhookVerificationResult {
+  VERIFIED
+  /// The signature did not match the shared secret.
+  SIGNATURE_INVALID
+  /// Correctly signed, but the timestamp is outside the accepted window: a replay.
+  REPLAYED
+  /// Signed and fresh, but the body could not be understood.
+  MALFORMED
+  /// Signed and fresh, but names a payment or transaction this school does not have.
+  UNKNOWN_REFERENCE
+
+  @@map("webhook_verification_result")
+}
+
 /// Which counter an `IdentifierSequence` row tracks.
 enum SequenceKind {
   /// Student IDs: `STU-2026-00125`
   STUDENT
   /// Receipt numbers: `RCP-2026-000001234`
   RECEIPT
+  /// Payment references: `PAY-2026-000001234`
+  PAYMENT
 
   @@map("sequence_kind")
 }
@@ -303,37 +454,44 @@ model School {
   logoUrl   String?      @map("logo_url")
   status    SchoolStatus @default(ACTIVE)
 
-  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
-  version   Int       @default(0)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(0)
 
-  settings       SchoolSetting?
-  users          User[]
-  roleAssignments UserRole[]
-  departments    Department[]
-  programs       Program[]
-  levels         Level[]
-  classSections  ClassSection[]
-  academicYears  AcademicYear[]
-  terms          Term[]
-  students       Student[]
-  guardians      Guardian[]
-  studentGuardians StudentGuardian[]
-  enrollments    Enrollment[]
-  auditLogs      AuditLog[]
-  identifierSequences IdentifierSequence[]
-  feeCategories      FeeCategory[]
-  feeStructures      FeeStructure[]
-  feeStructureItems  FeeStructureItem[]
-  chargeRuns         ChargeRun[]
-  studentCharges     StudentCharge[]
-  discounts          Discount[]
-  scholarships       Scholarship[]
-  studentScholarships StudentScholarship[]
-  feeWaivers         FeeWaiver[]
+  settings             SchoolSetting?
+  users                User[]
+  roleAssignments      UserRole[]
+  departments          Department[]
+  programs             Program[]
+  levels               Level[]
+  classSections        ClassSection[]
+  academicYears        AcademicYear[]
+  terms                Term[]
+  students             Student[]
+  guardians            Guardian[]
+  studentGuardians     StudentGuardian[]
+  enrollments          Enrollment[]
+  auditLogs            AuditLog[]
+  identifierSequences  IdentifierSequence[]
+  feeCategories        FeeCategory[]
+  feeStructures        FeeStructure[]
+  feeStructureItems    FeeStructureItem[]
+  chargeRuns           ChargeRun[]
+  studentCharges       StudentCharge[]
+  discounts            Discount[]
+  scholarships         Scholarship[]
+  studentScholarships  StudentScholarship[]
+  feeWaivers           FeeWaiver[]
   financialAdjustments FinancialAdjustment[]
-  financialAccounts  StudentFinancialAccount[]
-  financialEntries   FinancialEntry[]
+  financialAccounts    StudentFinancialAccount[]
+  financialEntries     FinancialEntry[]
+  payments             Payment[]
+  paymentTransactions  PaymentTransaction[]
+  paymentStatusHistory PaymentStatusHistory[]
+  paymentEvidence      PaymentEvidence[]
+  paymentWebhookEvents PaymentWebhookEvent[]
+  statementImports     BankStatementImport[]
+  statementLines       BankStatementLine[]
 
   @@map("schools")
 }
@@ -346,12 +504,12 @@ model School {
 /// last_value + 1 RETURNING last_value` is atomic, so allocation is safe without an
 /// explicit lock (see `src/lib/identifier-sequence.ts`).
 model IdentifierSequence {
-  id       String       @id @default(uuid()) @db.Uuid
-  schoolId String       @map("school_id") @db.Uuid
-  kind     SequenceKind
+  id        String       @id @default(uuid()) @db.Uuid
+  schoolId  String       @map("school_id") @db.Uuid
+  kind      SequenceKind
   /// Calendar year the counter belongs to; counters restart each year.
-  year     Int
-  lastValue Int         @default(0) @map("last_value")
+  year      Int
+  lastValue Int          @default(0) @map("last_value")
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -436,9 +594,9 @@ model User {
   /// --- multi-factor authentication (Section 6)
   /// Whether TOTP is active. A check constraint enforces that an enabled account has a
   /// secret, so "MFA on, no secret" -- which would lock the user out -- cannot exist.
-  mfaEnabled Boolean @default(false) @map("mfa_enabled")
+  mfaEnabled                Boolean   @default(false) @map("mfa_enabled")
   /// AES-256-GCM ciphertext, never the raw secret (see `src/lib/crypto.ts`).
-  mfaSecretEncrypted String? @map("mfa_secret_encrypted")
+  mfaSecretEncrypted        String?   @map("mfa_secret_encrypted")
   /// Secret issued during enrolment, held here until a first valid code confirms it, so
   /// an abandoned enrolment cannot leave the account half-configured.
   mfaPendingSecretEncrypted String?   @map("mfa_pending_secret_encrypted")
@@ -460,19 +618,19 @@ model User {
   deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
   version   Int       @default(0)
 
-  school           School?    @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  roleAssignments  UserRole[] @relation("UserRoleHolder")
-  rolesAssigned    UserRole[] @relation("UserRoleAssigner")
-  guardianProfile  Guardian?
-  auditLogs        AuditLog[]
-  sessions         Session[]
-  recoveryCodes    MfaRecoveryCode[]
-  passwordResets   PasswordResetToken[]
+  school          School?              @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  roleAssignments UserRole[]           @relation("UserRoleHolder")
+  rolesAssigned   UserRole[]           @relation("UserRoleAssigner")
+  guardianProfile Guardian?
+  auditLogs       AuditLog[]
+  sessions        Session[]
+  recoveryCodes   MfaRecoveryCode[]
+  passwordResets  PasswordResetToken[]
 
   // Financial actions are attributed to a person, never to "the system" (Section 27).
-  chargeRunsExecuted   ChargeRun[]     @relation("ChargeRunExecutor")
-  chargesRaised        StudentCharge[] @relation("ChargeRaiser")
-  chargesVoided        StudentCharge[] @relation("ChargeVoider")
+  chargeRunsExecuted ChargeRun[]     @relation("ChargeRunExecutor")
+  chargesRaised      StudentCharge[] @relation("ChargeRaiser")
+  chargesVoided      StudentCharge[] @relation("ChargeVoider")
 
   discountsRequested    Discount[]            @relation("DiscountRequester")
   discountsDecided      Discount[]            @relation("DiscountApprover")
@@ -487,6 +645,14 @@ model User {
   adjustmentsDecided    FinancialAdjustment[] @relation("AdjustmentApprover")
   adjustmentsReversed   FinancialAdjustment[] @relation("AdjustmentReverser")
   entriesPosted         FinancialEntry[]      @relation("EntryPoster")
+
+  paymentsInitiated       Payment[]              @relation("PaymentInitiator")
+  paymentsVerified        Payment[]              @relation("PaymentVerifier")
+  paymentsReversed        Payment[]              @relation("PaymentReverser")
+  paymentStatusChanges    PaymentStatusHistory[] @relation("PaymentStatusActor")
+  paymentEvidenceUploaded PaymentEvidence[]      @relation("EvidenceUploader")
+  statementsImported      BankStatementImport[]  @relation("StatementImporter")
+  statementLinesMatched   BankStatementLine[]    @relation("StatementMatcher")
 
   @@index([schoolId])
   @@index([schoolId, status])
@@ -503,8 +669,8 @@ model User {
 /// The access token is a short-lived JWT that names this session; every authenticated
 /// request re-reads the session, the account status and the current permissions.
 model Session {
-  id     String  @id @default(uuid()) @db.Uuid
-  userId String  @map("user_id") @db.Uuid
+  id       String  @id @default(uuid()) @db.Uuid
+  userId   String  @map("user_id") @db.Uuid
   /// The school the session is scoped to, copied at sign-in. Null for a Super
   /// Administrator's cross-school session.
   schoolId String? @map("school_id") @db.Uuid
@@ -516,15 +682,15 @@ model Session {
   ipAddress String? @map("ip_address")
   userAgent String? @map("user_agent")
 
-  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
-  lastSeenAt DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(3)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastSeenAt    DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(3)
   /// Absolute end of the session, regardless of activity.
-  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
-  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
+  expiresAt     DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt     DateTime? @map("revoked_at") @db.Timestamptz(3)
   /// Why it ended: `logout`, `logout_all`, `token_reuse_detected`, `password_changed`,
   /// `account_suspended`, `roles_changed`. Recorded because "why am I signed out?" is a
   /// real support question, and because token reuse is a security event.
-  revokedReason String? @map("revoked_reason")
+  revokedReason String?   @map("revoked_reason")
 
   user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   refreshTokens RefreshToken[]
@@ -548,12 +714,12 @@ model RefreshToken {
   sessionId String @map("session_id") @db.Uuid
   tokenHash String @unique @map("token_hash")
 
-  issuedAt  DateTime  @default(now()) @map("issued_at") @db.Timestamptz(3)
-  expiresAt DateTime  @map("expires_at") @db.Timestamptz(3)
+  issuedAt     DateTime  @default(now()) @map("issued_at") @db.Timestamptz(3)
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz(3)
   /// When this token was exchanged. A second presentation after this is set is a reuse.
-  usedAt    DateTime? @map("used_at") @db.Timestamptz(3)
+  usedAt       DateTime? @map("used_at") @db.Timestamptz(3)
   /// The token issued in its place, so the chain can be walked during an investigation.
-  replacedById String? @unique @map("replaced_by_id") @db.Uuid
+  replacedById String?   @unique @map("replaced_by_id") @db.Uuid
 
   session    Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   replacedBy RefreshToken? @relation("TokenRotation", fields: [replacedById], references: [id], onDelete: SetNull)
@@ -590,13 +756,13 @@ model MfaRecoveryCode {
 /// reset; and `usedAt` is recorded rather than the row being deleted, so a reset that
 /// was already consumed is distinguishable from one that never existed.
 model PasswordResetToken {
-  id        String    @id @default(uuid()) @db.Uuid
-  userId    String    @map("user_id") @db.Uuid
-  tokenHash String    @unique @map("token_hash")
-  expiresAt DateTime  @map("expires_at") @db.Timestamptz(3)
-  usedAt    DateTime? @map("used_at") @db.Timestamptz(3)
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  tokenHash   String    @unique @map("token_hash")
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(3)
+  usedAt      DateTime? @map("used_at") @db.Timestamptz(3)
   /// Where the request came from, for abuse investigation.
-  requestedIp String? @map("requested_ip")
+  requestedIp String?   @map("requested_ip")
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
@@ -670,9 +836,9 @@ model RolePermission {
 /// Grants a role to a user within a school. The school is on the assignment, not the
 /// role, so the same person could hold different roles at different schools.
 model UserRole {
-  id     String  @id @default(uuid()) @db.Uuid
-  userId String  @map("user_id") @db.Uuid
-  roleId String  @map("role_id") @db.Uuid
+  id       String  @id @default(uuid()) @db.Uuid
+  userId   String  @map("user_id") @db.Uuid
+  roleId   String  @map("role_id") @db.Uuid
   /// Null only for a system-wide Super Administrator assignment.
   schoolId String? @map("school_id") @db.Uuid
 
@@ -717,26 +883,26 @@ model Department {
 /// O'Level, A'Level or TVET is hard-coded -- a school administrator configures
 /// programmes and their levels, and promotion follows the level chain (Section 9).
 model Program {
-  id           String        @id @default(uuid()) @db.Uuid
-  schoolId     String        @map("school_id") @db.Uuid
-  departmentId String?       @map("department_id") @db.Uuid
-  code         String
-  name         String
-  description  String?
+  id            String        @id @default(uuid()) @db.Uuid
+  schoolId      String        @map("school_id") @db.Uuid
+  departmentId  String?       @map("department_id") @db.Uuid
+  code          String
+  name          String
+  description   String?
   /// Nominal length, used for planning and reports rather than for promotion logic,
   /// which follows the level chain.
-  durationYears Int?         @map("duration_years")
-  status       ProgramStatus @default(ACTIVE)
-  sortOrder    Int           @default(0) @map("sort_order")
+  durationYears Int?          @map("duration_years")
+  status        ProgramStatus @default(ACTIVE)
+  sortOrder     Int           @default(0) @map("sort_order")
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
   version   Int      @default(0)
 
-  school      School      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  department  Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
-  levels      Level[]
-  enrollments Enrollment[]
+  school        School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  department    Department?    @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  levels        Level[]
+  enrollments   Enrollment[]
   feeStructures FeeStructure[]
 
   @@unique([schoolId, code])
@@ -782,13 +948,13 @@ model Level {
 /// afresh each year, and because current enrolment counts per class must be answerable
 /// for the current year alone (Section 11).
 model ClassSection {
-  id             String  @id @default(uuid()) @db.Uuid
-  schoolId       String  @map("school_id") @db.Uuid
-  academicYearId String  @map("academic_year_id") @db.Uuid
-  levelId        String  @map("level_id") @db.Uuid
-  code           String
-  name           String
-  capacity       Int?
+  id               String  @id @default(uuid()) @db.Uuid
+  schoolId         String  @map("school_id") @db.Uuid
+  academicYearId   String  @map("academic_year_id") @db.Uuid
+  levelId          String  @map("level_id") @db.Uuid
+  code             String
+  name             String
+  capacity         Int?
   /// Optional class teacher. Kept as a plain name until staff records exist.
   classTeacherName String? @map("class_teacher_name")
 
@@ -796,8 +962,8 @@ model ClassSection {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
   version   Int      @default(0)
 
-  school       School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  school        School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  academicYear  AcademicYear   @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
   level         Level          @relation(fields: [levelId], references: [id], onDelete: Restrict)
   enrollments   Enrollment[]
   feeStructures FeeStructure[]
@@ -825,18 +991,19 @@ model AcademicYear {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
   version   Int      @default(0)
 
-  school        School         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  terms         Term[]
-  classSections ClassSection[]
-  enrollments   Enrollment[]
-  feeStructures FeeStructure[]
-  chargeRuns    ChargeRun[]
-  charges       StudentCharge[]
-  discounts     Discount[]
-  scholarships  StudentScholarship[]
-  waivers       FeeWaiver[]
-  adjustments   FinancialAdjustment[]
+  school           School                @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  terms            Term[]
+  classSections    ClassSection[]
+  enrollments      Enrollment[]
+  feeStructures    FeeStructure[]
+  chargeRuns       ChargeRun[]
+  charges          StudentCharge[]
+  discounts        Discount[]
+  scholarships     StudentScholarship[]
+  waivers          FeeWaiver[]
+  adjustments      FinancialAdjustment[]
   financialEntries FinancialEntry[]
+  payments         Payment[]
 
   @@unique([schoolId, name])
   @@index([schoolId, status])
@@ -865,16 +1032,17 @@ model Term {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
   version   Int      @default(0)
 
-  school        School          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  academicYear  AcademicYear    @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
-  feeStructures FeeStructure[]
-  chargeRuns    ChargeRun[]
-  charges       StudentCharge[]
-  discounts     Discount[]
-  scholarships  StudentScholarship[]
-  waivers       FeeWaiver[]
-  adjustments   FinancialAdjustment[]
+  school           School                @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  academicYear     AcademicYear          @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  feeStructures    FeeStructure[]
+  chargeRuns       ChargeRun[]
+  charges          StudentCharge[]
+  discounts        Discount[]
+  scholarships     StudentScholarship[]
+  waivers          FeeWaiver[]
+  adjustments      FinancialAdjustment[]
   financialEntries FinancialEntry[]
+  payments         Payment[]
 
   @@unique([schoolId, academicYearId, sequence])
   @@unique([schoolId, academicYearId, name])
@@ -894,10 +1062,10 @@ model Student {
   /// e.g. `STU-2026-00125`. Unique per school.
   studentId String @map("student_id")
 
-  firstName  String  @map("first_name")
-  lastName   String  @map("last_name")
-  otherNames String? @map("other_names")
-  gender     Gender  @default(UNDISCLOSED)
+  firstName   String    @map("first_name")
+  lastName    String    @map("last_name")
+  otherNames  String?   @map("other_names")
+  gender      Gender    @default(UNDISCLOSED)
   /// Date only: a birth date has no meaningful time or zone.
   dateOfBirth DateTime? @map("date_of_birth") @db.Date
 
@@ -922,16 +1090,17 @@ model Student {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
   version   Int      @default(0)
 
-  school     School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  guardians  StudentGuardian[]
-  enrollments Enrollment[]
-  charges     StudentCharge[]
-  discounts   Discount[]
-  scholarships StudentScholarship[]
-  waivers     FeeWaiver[]
-  adjustments FinancialAdjustment[]
+  school           School                   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  guardians        StudentGuardian[]
+  enrollments      Enrollment[]
+  charges          StudentCharge[]
+  discounts        Discount[]
+  scholarships     StudentScholarship[]
+  waivers          FeeWaiver[]
+  adjustments      FinancialAdjustment[]
   financialAccount StudentFinancialAccount?
   financialEntries FinancialEntry[]
+  payments         Payment[]
 
   @@unique([schoolId, studentId])
   @@index([schoolId, status])
@@ -943,22 +1112,22 @@ model Student {
 /// A parent, guardian or sponsor. Separate from `User` because many guardians never get
 /// a login, and one guardian may be linked to several students.
 model Guardian {
-  id       String @id @default(uuid()) @db.Uuid
-  schoolId String @map("school_id") @db.Uuid
+  id       String  @id @default(uuid()) @db.Uuid
+  schoolId String  @map("school_id") @db.Uuid
   /// Set when the guardian has a parent-portal account.
   userId   String? @unique @map("user_id") @db.Uuid
 
-  firstName String  @map("first_name")
-  lastName  String  @map("last_name")
+  firstName        String  @map("first_name")
+  lastName         String  @map("last_name")
   /// Primary contact number: the channel most payment notifications use.
-  phone     String
-  altPhone  String? @map("alt_phone")
-  email     String?
+  phone            String
+  altPhone         String? @map("alt_phone")
+  email            String?
   nationalIdNumber String? @map("national_id_number")
-  occupation String?
-  district   String?
-  sector     String?
-  address    String?
+  occupation       String?
+  district         String?
+  sector           String?
+  address          String?
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -978,20 +1147,20 @@ model Guardian {
 /// Section 26 turns into authorisation checks: a parent may only see and pay for the
 /// students they are explicitly linked to, with these flags.
 model StudentGuardian {
-  id         String               @id @default(uuid()) @db.Uuid
-  schoolId   String               @map("school_id") @db.Uuid
-  studentId  String               @map("student_id") @db.Uuid
-  guardianId String               @map("guardian_id") @db.Uuid
+  id           String               @id @default(uuid()) @db.Uuid
+  schoolId     String               @map("school_id") @db.Uuid
+  studentId    String               @map("student_id") @db.Uuid
+  guardianId   String               @map("guardian_id") @db.Uuid
   relationship GuardianRelationship @default(GUARDIAN)
 
   /// First person the school contacts about this student.
-  isPrimaryContact Boolean @default(false) @map("is_primary_contact")
+  isPrimaryContact         Boolean @default(false) @map("is_primary_contact")
   /// Responsible for paying this student's fees.
   isFinanciallyResponsible Boolean @default(false) @map("is_financially_responsible")
   /// May view fees, balances, payment history and receipts.
-  canViewFinancials Boolean @default(true) @map("can_view_financials")
+  canViewFinancials        Boolean @default(true) @map("can_view_financials")
   /// May start a payment for this student.
-  canInitiatePayments Boolean @default(true) @map("can_initiate_payments")
+  canInitiatePayments      Boolean @default(true) @map("can_initiate_payments")
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -1013,14 +1182,14 @@ model StudentGuardian {
 /// completion, transfer and withdrawal all create or close an enrolment row, and no
 /// historical enrolment is ever overwritten (Section 8, 22).
 model Enrollment {
-  id             String @id @default(uuid()) @db.Uuid
-  schoolId       String @map("school_id") @db.Uuid
-  studentId      String @map("student_id") @db.Uuid
-  academicYearId String @map("academic_year_id") @db.Uuid
+  id             String  @id @default(uuid()) @db.Uuid
+  schoolId       String  @map("school_id") @db.Uuid
+  studentId      String  @map("student_id") @db.Uuid
+  academicYearId String  @map("academic_year_id") @db.Uuid
   /// Denormalised from the level so programme-level reports do not need a second join
   /// across a chain that may since have been reorganised.
-  programId      String @map("program_id") @db.Uuid
-  levelId        String @map("level_id") @db.Uuid
+  programId      String  @map("program_id") @db.Uuid
+  levelId        String  @map("level_id") @db.Uuid
   classSectionId String? @map("class_section_id") @db.Uuid
 
   status         EnrollmentStatus @default(ENROLLED)
@@ -1038,12 +1207,12 @@ model Enrollment {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
   version   Int      @default(0)
 
-  school       School        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  student      Student       @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  academicYear AcademicYear  @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
-  program      Program       @relation(fields: [programId], references: [id], onDelete: Restrict)
-  level        Level         @relation(fields: [levelId], references: [id], onDelete: Restrict)
-  classSection ClassSection? @relation(fields: [classSectionId], references: [id], onDelete: SetNull)
+  school       School          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student      Student         @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  academicYear AcademicYear    @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  program      Program         @relation(fields: [programId], references: [id], onDelete: Restrict)
+  level        Level           @relation(fields: [levelId], references: [id], onDelete: Restrict)
+  classSection ClassSection?   @relation(fields: [classSectionId], references: [id], onDelete: SetNull)
   charges      StudentCharge[]
 
   // A partial unique index in the constraints migration allows only one ENROLLED row per
@@ -1076,8 +1245,8 @@ model FeeCategory {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
   version   Int      @default(0)
 
-  school School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  items  FeeStructureItem[]
+  school  School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  items   FeeStructureItem[]
   charges StudentCharge[]
 
   @@unique([schoolId, code])
@@ -1260,11 +1429,11 @@ model StudentCharge {
   raisedBy         User              @relation("ChargeRaiser", fields: [raisedByUserId], references: [id], onDelete: Restrict)
   voidedBy         User?             @relation("ChargeVoider", fields: [voidedByUserId], references: [id], onDelete: Restrict)
 
-  discounts   Discount[]
+  discounts    Discount[]
   scholarships StudentScholarship[]
-  waivers     FeeWaiver[]
-  adjustments FinancialAdjustment[]
-  entries     FinancialEntry[]
+  waivers      FeeWaiver[]
+  adjustments  FinancialAdjustment[]
+  entries      FinancialEntry[]
 
   // Duplicate protection lives in the constraints migration as two partial unique
   // indexes, because the key branches on whether the charge is termly or annual and
@@ -1302,14 +1471,14 @@ model Discount {
   reason String
   status ApprovalStatus @default(PENDING_APPROVAL)
 
-  requestedByUserId String   @map("requested_by_user_id") @db.Uuid
-  requestedAt       DateTime @default(now()) @map("requested_at") @db.Timestamptz(3)
-  decidedByUserId   String?  @map("decided_by_user_id") @db.Uuid
+  requestedByUserId String    @map("requested_by_user_id") @db.Uuid
+  requestedAt       DateTime  @default(now()) @map("requested_at") @db.Timestamptz(3)
+  decidedByUserId   String?   @map("decided_by_user_id") @db.Uuid
   decidedAt         DateTime? @map("decided_at") @db.Timestamptz(3)
-  decisionNote      String?  @map("decision_note")
-  reversedByUserId  String?  @map("reversed_by_user_id") @db.Uuid
+  decisionNote      String?   @map("decision_note")
+  reversedByUserId  String?   @map("reversed_by_user_id") @db.Uuid
   reversedAt        DateTime? @map("reversed_at") @db.Timestamptz(3)
-  reversalReason    String?  @map("reversal_reason")
+  reversalReason    String?   @map("reversal_reason")
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -1372,10 +1541,10 @@ model Scholarship {
 /// year or term a student benefits is its own approved record, so withdrawing an award
 /// next year changes nothing about the year it did apply to, and nothing renews silently.
 model StudentScholarship {
-  id            String  @id @default(uuid()) @db.Uuid
-  schoolId      String  @map("school_id") @db.Uuid
-  scholarshipId String  @map("scholarship_id") @db.Uuid
-  studentId     String  @map("student_id") @db.Uuid
+  id              String  @id @default(uuid()) @db.Uuid
+  schoolId        String  @map("school_id") @db.Uuid
+  scholarshipId   String  @map("scholarship_id") @db.Uuid
+  studentId       String  @map("student_id") @db.Uuid
   /// Null for an award covering a whole period rather than one charge.
   studentChargeId String? @map("student_charge_id") @db.Uuid
 
@@ -1434,7 +1603,7 @@ model FeeWaiver {
   academicYearId String  @map("academic_year_id") @db.Uuid
   termId         String? @map("term_id") @db.Uuid
 
-  amount Decimal @db.Decimal(14, 2)
+  amount Decimal        @db.Decimal(14, 2)
   reason String
   status ApprovalStatus @default(PENDING_APPROVAL)
 
@@ -1544,9 +1713,10 @@ model StudentFinancialAccount {
   updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
   version   Int       @default(0)
 
-  school  School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  student Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  entries FinancialEntry[]
+  school   School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student  Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  entries  FinancialEntry[]
+  payments Payment[]
 
   @@index([schoolId, status])
   @@map("student_financial_accounts")
@@ -1591,6 +1761,11 @@ model FinancialEntry {
   studentScholarshipId  String? @map("student_scholarship_id") @db.Uuid
   feeWaiverId           String? @map("fee_waiver_id") @db.Uuid
   financialAdjustmentId String? @map("financial_adjustment_id") @db.Uuid
+  /// Phase 5. Set on a PAYMENT entry — the credit a verified payment posted, or the
+  /// compensating debit that undid it. A partial unique index permits exactly one
+  /// opening credit per payment, which is what makes a duplicate callback structurally
+  /// incapable of crediting twice rather than merely unlikely to.
+  paymentId             String? @map("payment_id") @db.Uuid
 
   /// What this line says on a statement.
   description String
@@ -1612,6 +1787,7 @@ model FinancialEntry {
   studentScholarship  StudentScholarship?     @relation(fields: [studentScholarshipId], references: [id], onDelete: Restrict)
   feeWaiver           FeeWaiver?              @relation(fields: [feeWaiverId], references: [id], onDelete: Restrict)
   financialAdjustment FinancialAdjustment?    @relation(fields: [financialAdjustmentId], references: [id], onDelete: Restrict)
+  payment             Payment?                @relation(fields: [paymentId], references: [id], onDelete: Restrict)
   postedBy            User                    @relation("EntryPoster", fields: [postedByUserId], references: [id], onDelete: Restrict)
   reversalOf          FinancialEntry?         @relation("EntryReversal", fields: [reversalOfEntryId], references: [id], onDelete: Restrict)
   reversedBy          FinancialEntry?         @relation("EntryReversal")
@@ -1620,7 +1796,459 @@ model FinancialEntry {
   @@index([accountId, postedAt])
   @@index([schoolId, source, postedAt])
   @@index([studentChargeId])
+  // "Which ledger lines belong to this payment?" — asked by the payment detail screen
+  // for every payment it shows, and by a reversal before it posts.
+  @@index([paymentId])
   @@map("financial_entries")
+}
+
+/// ------------------------------------------------------------------- payments
+
+/// A payment: one attempt by one payer to settle part of what one student owes.
+///
+/// **Carries no ledger effect of its own.** A payment is a business record, exactly like
+/// a charge or a discount; what it does to a balance is the `FinancialEntry` it posts on
+/// verification, and nothing else (ADR-022). A payment stuck in PENDING has moved no
+/// money, and no screen adds a payment row into a total.
+///
+/// The three things this table is shaped to make impossible:
+///
+///  - **Crediting twice.** `payment_id` on `financial_entries` carries a partial unique
+///    index permitting one opening credit per payment. A duplicate callback, a retried
+///    request and two concurrent finalisers all collide on it.
+///  - **Creating twice.** `(school_id, idempotency_key)` is unique, so a retried
+///    initiation returns the payment it already made rather than making another. The
+///    fingerprint alongside it is what distinguishes an honest retry from the same key
+///    being reused for a different request.
+///  - **Editing history.** Verification, reversal and refund each add columns and a
+///    status-history row. The amount, the payer and the period are never rewritten.
+model Payment {
+  id        String @id @default(uuid()) @db.Uuid
+  schoolId  String @map("school_id") @db.Uuid
+  studentId String @map("student_id") @db.Uuid
+  /// The account the credit will be posted to. Resolved and pinned at initiation so a
+  /// payment cannot be verified into a different account than it was accepted for.
+  accountId String @map("account_id") @db.Uuid
+
+  /// The period the credit belongs to. A ledger entry must name a year, so a payment
+  /// must too; the term is optional for a fee charged once per year.
+  academicYearId String  @map("academic_year_id") @db.Uuid
+  termId         String? @map("term_id") @db.Uuid
+
+  /// e.g. `PAY-2026-000001234`. Allocated from the per-year counter, because this is
+  /// what a parent reads out over the phone and what reconciliation joins on.
+  reference String
+
+  /// Always positive, always in `currency`, which must match the account's.
+  amount   Decimal @db.Decimal(14, 2)
+  currency String  @db.VarChar(3)
+
+  method             PaymentMethod
+  verificationMethod PaymentVerificationMethod @map("verification_method")
+  status             PaymentStatus             @default(PENDING)
+  /// Null for cash handed over at the bursar's office, which has no provider.
+  providerKey        PaymentProviderKey?       @map("provider_key")
+
+  /// Who paid. Recorded because the person paying is frequently not the account holder
+  /// and a bursar matching a statement line needs the name that appears on it.
+  payerName         String  @map("payer_name")
+  payerPhone        String? @map("payer_phone")
+  payerEmail        String? @map("payer_email")
+  /// The bank or wallet reference the payer quotes, or the provider returns. Not unique:
+  /// a payer can mistype one, and refusing the claim outright would lose the evidence.
+  externalReference String? @map("external_reference")
+
+  /// Client-supplied key making initiation safe to retry (Section 14).
+  idempotencyKey         String? @map("idempotency_key")
+  /// Digest of the request the key was first used for. A second request with the same
+  /// key but a different student, amount or method is a bug or an attack, not a retry,
+  /// and is refused rather than silently answered with the wrong payment.
+  idempotencyFingerprint String? @map("idempotency_fingerprint")
+
+  notes         String?
+  /// Why it failed, in words safe to show the payer. Never a provider stack trace.
+  failureReason String? @map("failure_reason")
+
+  initiatedByUserId String    @map("initiated_by_user_id") @db.Uuid
+  initiatedAt       DateTime  @default(now()) @map("initiated_at") @db.Timestamptz(3)
+  /// Set when the payment reached a terminal outcome, successful or not.
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(3)
+
+  /// --- verification. A check constraint requires all three on a SUCCESSFUL payment, so
+  /// a credited payment can never be missing the person who authorised it.
+  verifiedByUserId String?   @map("verified_by_user_id") @db.Uuid
+  verifiedAt       DateTime? @map("verified_at") @db.Timestamptz(3)
+  verificationNote String?   @map("verification_note")
+
+  /// --- reversal and refund. The original is preserved; these record the second fact.
+  reversedByUserId String?   @map("reversed_by_user_id") @db.Uuid
+  reversedAt       DateTime? @map("reversed_at") @db.Timestamptz(3)
+  reversalReason   String?   @map("reversal_reason")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(0)
+
+  school       School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student      Student                 @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  account      StudentFinancialAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  academicYear AcademicYear            @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  term         Term?                   @relation(fields: [termId], references: [id], onDelete: Restrict)
+  initiatedBy  User                    @relation("PaymentInitiator", fields: [initiatedByUserId], references: [id], onDelete: Restrict)
+  verifiedBy   User?                   @relation("PaymentVerifier", fields: [verifiedByUserId], references: [id], onDelete: Restrict)
+  reversedBy   User?                   @relation("PaymentReverser", fields: [reversedByUserId], references: [id], onDelete: Restrict)
+
+  transactions   PaymentTransaction[]
+  statusHistory  PaymentStatusHistory[]
+  evidence       PaymentEvidence[]
+  webhookEvents  PaymentWebhookEvent[]
+  /// The statement line this payment was reconciled against, once one is matched to it.
+  statementLines BankStatementLine[]
+  /// The ledger lines this payment produced: its credit, and any compensating entry.
+  entries        FinancialEntry[]
+
+  @@unique([schoolId, reference])
+  // Idempotency, enforced by the database rather than by a check the application runs
+  // and then hopes still holds. NULLs are distinct in PostgreSQL, so payments recorded
+  // without a key — a bursar taking cash at the desk — are unaffected.
+  @@unique([schoolId, idempotencyKey])
+  // The payments table: filtered by status, ordered by when it happened.
+  @@index([schoolId, status, initiatedAt])
+  // One student's payment history, which is the parent portal's main read.
+  @@index([schoolId, studentId, initiatedAt])
+  // The pending manual-verification queue: the bursar's daily worklist.
+  @@index([schoolId, verificationMethod, status, initiatedAt])
+  @@index([accountId])
+  @@map("payments")
+}
+
+/// One attempt against a payment provider.
+///
+/// Separate from `Payment` because the relationship is genuinely one-to-many: a payer
+/// whose first mobile-money prompt timed out tries again, and both attempts are facts
+/// worth keeping — the first may still settle later, which is the case that turns into a
+/// duplicate credit if the attempts are collapsed into one row that gets overwritten.
+///
+/// `(provider_key, provider_transaction_id)` is unique, which is the database-level
+/// rejection of the same provider transaction being recorded against two payments.
+model PaymentTransaction {
+  id        String @id @default(uuid()) @db.Uuid
+  schoolId  String @map("school_id") @db.Uuid
+  paymentId String @map("payment_id") @db.Uuid
+
+  providerKey PaymentProviderKey @map("provider_key")
+
+  /// The reference the school sends the provider, and the one a callback must quote back.
+  /// Unique per school so an inbound callback resolves to exactly one attempt.
+  internalReference     String  @map("internal_reference")
+  /// The provider's own identifier. Null until it gives one — a request that timed out
+  /// before any response has no provider id and must not be assumed to have failed.
+  providerTransactionId String? @map("provider_transaction_id")
+
+  requestedAmount Decimal  @map("requested_amount") @db.Decimal(14, 2)
+  /// What the provider says was actually taken. Compared against the payment amount
+  /// before anything is credited; a mismatch parks the payment for review rather than
+  /// crediting the smaller or larger figure (Section 20).
+  confirmedAmount Decimal? @map("confirmed_amount") @db.Decimal(14, 2)
+  currency        String   @db.VarChar(3)
+
+  status PaymentTransactionStatus @default(INITIATED)
+
+  failureCode      String? @map("failure_code")
+  failureMessage   String? @map("failure_message")
+  /// A deliberately small, provider-specific subset: status codes, references and
+  /// timestamps. Never credentials, tokens, signatures or a full callback body
+  /// (Section 38).
+  providerMetadata Json?   @map("provider_metadata")
+
+  initiatedAt DateTime  @default(now()) @map("initiated_at") @db.Timestamptz(3)
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  school  School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  webhookEvents PaymentWebhookEvent[]
+
+  @@unique([schoolId, internalReference])
+  @@unique([providerKey, providerTransactionId])
+  @@index([paymentId, initiatedAt])
+  @@index([schoolId, status, initiatedAt])
+  @@map("payment_transactions")
+}
+
+/// Every meaningful status transition a payment went through. Insert-only.
+///
+/// Kept as rows rather than inferred from the timestamps on `payments`, because the
+/// question a reviewer asks months later is "how did this get here?" — and a column
+/// holding the current status cannot answer it. A payment that went
+/// PENDING → REQUIRES_REVIEW → SUCCESSFUL looks identical to one verified first time
+/// unless the intermediate step was written down.
+model PaymentStatusHistory {
+  id        String @id @default(uuid()) @db.Uuid
+  schoolId  String @map("school_id") @db.Uuid
+  paymentId String @map("payment_id") @db.Uuid
+
+  /// Null on the row recording the payment's creation.
+  fromStatus PaymentStatus? @map("from_status")
+  toStatus   PaymentStatus  @map("to_status")
+
+  source PaymentStatusChangeSource
+  reason String?
+
+  /// Null when the provider or the system caused the change rather than a person.
+  actorUserId String? @map("actor_user_id") @db.Uuid
+  metadata    Json?
+
+  occurredAt DateTime @default(now()) @map("occurred_at") @db.Timestamptz(3)
+
+  school  School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  actor   User?   @relation("PaymentStatusActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([paymentId, occurredAt])
+  @@index([schoolId, toStatus, occurredAt])
+  @@map("payment_status_history")
+}
+
+/// Proof of payment attached to a manual claim.
+///
+/// Insert-only, like everything else that justifies money moving. Replacing a slip does
+/// not overwrite the old row: the new one is inserted and the old is marked superseded,
+/// so "the evidence changed after the bursar looked at it" is visible rather than
+/// invisible (Section 23).
+///
+/// The file itself lives outside the database and outside any web-servable path, keyed by
+/// `storageKey`. It is only ever served through an authenticated endpoint, so there is no
+/// URL to forward to someone who may not see it.
+model PaymentEvidence {
+  id        String              @id @default(uuid()) @db.Uuid
+  schoolId  String              @map("school_id") @db.Uuid
+  paymentId String              @map("payment_id") @db.Uuid
+  kind      PaymentEvidenceKind
+
+  /// Opaque, server-generated storage path. Never derived from the uploaded filename,
+  /// which is attacker-controlled and would otherwise allow path traversal.
+  storageKey  String @map("storage_key")
+  /// What the uploader called it. Shown to a reviewer, never used as a path.
+  fileName    String @map("file_name")
+  /// Determined from the file's own magic bytes, not from the browser's Content-Type.
+  contentType String @map("content_type")
+  byteSize    Int    @map("byte_size")
+  /// SHA-256 of the bytes. Lets a reviewer tell a re-uploaded duplicate from a
+  /// genuinely different document, and lets an auditor prove the file is unchanged.
+  checksum    String
+
+  /// Whether the bytes were scanned for malicious content. `SKIPPED` is the honest value
+  /// when no scanner is configured, and it is recorded rather than assumed: a reviewer
+  /// must be able to tell an unscanned file from a clean one. See docs/SECURITY.md.
+  scanState ContentScanState @default(SKIPPED) @map("scan_state")
+
+  uploadedByUserId String   @map("uploaded_by_user_id") @db.Uuid
+  uploadedAt       DateTime @default(now()) @map("uploaded_at") @db.Timestamptz(3)
+
+  /// False once a later upload of the same kind replaced it. Superseded rows are kept.
+  isCurrent Boolean @default(true) @map("is_current")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  school     School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  payment    Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  uploadedBy User    @relation("EvidenceUploader", fields: [uploadedByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([storageKey])
+  @@index([paymentId, uploadedAt])
+  @@index([schoolId, scanState])
+  @@map("payment_evidence")
+}
+
+/// Every inbound provider callback, verified or not. Insert-only.
+///
+/// Written **before** the callback is acted on, which is what makes webhook processing
+/// idempotent: `(provider_key, event_id)` is unique, so a re-delivered callback loses the
+/// insert and is answered from the record of the first delivery instead of being
+/// processed again. Combined with the one-credit-per-payment index, a provider retrying
+/// ten times produces one credit.
+///
+/// Rejected callbacks are recorded too. A single bad signature is a misconfiguration; a
+/// stream of them is someone forging callbacks, and that distinction only exists if the
+/// failures were written down (Section 16).
+model PaymentWebhookEvent {
+  id       String  @id @default(uuid()) @db.Uuid
+  /// Null when the callback could not be attributed to a school — an unknown reference,
+  /// or a body that failed verification before anything was parsed.
+  schoolId String? @map("school_id") @db.Uuid
+
+  providerKey PaymentProviderKey @map("provider_key")
+  /// The provider's delivery identifier, or the payload digest when it sends none. Never
+  /// null, so the uniqueness guarantee holds for every provider.
+  eventId     String             @map("event_id")
+
+  paymentId            String? @map("payment_id") @db.Uuid
+  paymentTransactionId String? @map("payment_transaction_id") @db.Uuid
+
+  verification  WebhookVerificationResult
+  /// The timestamp the provider signed, used to refuse a replayed capture.
+  signedAt      DateTime?                 @map("signed_at") @db.Timestamptz(3)
+  /// SHA-256 of the raw request body. Lets an investigation prove exactly what was
+  /// received without storing a payload that may carry payer detail or provider tokens.
+  payloadDigest String                    @map("payload_digest")
+  /// A small, deliberately chosen subset of the callback: its event type, the reference
+  /// it named, the amount and the status. Never the raw body (Sections 22, 38).
+  safeMetadata  Json?                     @map("safe_metadata")
+
+  /// The status the payment was moved to as a result, if any.
+  resultingStatus PaymentStatus? @map("resulting_status")
+  /// Correlates with the API access log and the audit entry.
+  requestId       String?        @map("request_id")
+
+  receivedAt  DateTime  @default(now()) @map("received_at") @db.Timestamptz(3)
+  processedAt DateTime? @map("processed_at") @db.Timestamptz(3)
+
+  school             School?             @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+  payment            Payment?            @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  paymentTransaction PaymentTransaction? @relation(fields: [paymentTransactionId], references: [id], onDelete: SetNull)
+
+  @@unique([providerKey, eventId])
+  @@index([schoolId, receivedAt])
+  @@index([providerKey, verification, receivedAt])
+  @@index([paymentId])
+  @@map("payment_webhook_events")
+}
+
+/// --------------------------------------------------- reconciliation (Phase 5)
+
+/// Which way the money went on a bank statement line.
+///
+/// Deliberately its own enum rather than a reuse of `EntryDirection`. A DEBIT on a
+/// student's account and a debit on the school's bank account are opposite things, and a
+/// shared enum would make the two readings indistinguishable in code that has to reconcile
+/// one against the other.
+enum BankStatementDirection {
+  /// Money arrived in the school's account. These are the lines a payment can match.
+  MONEY_IN
+  /// Money left it: a bank charge, a reversal, a transfer out. Never matched to a
+  /// payment, but imported so the statement reconciles to its own total.
+  MONEY_OUT
+
+  @@map("bank_statement_direction")
+}
+
+/// What has been decided about one statement line.
+enum StatementLineMatchStatus {
+  /// Nobody has attributed it yet. The bursar's worklist.
+  UNMATCHED
+  /// Attributed to exactly one payment.
+  MATCHED
+  /// Deliberately set aside, with a reason: a bank charge, a transfer between the
+  /// school's own accounts, a duplicate line in the export.
+  IGNORED
+  /// More than one payment could be the one. Parked for a person rather than guessed,
+  /// because guessing means crediting the wrong family (Section 20).
+  AMBIGUOUS
+
+  @@map("statement_line_match_status")
+}
+
+/// One uploaded bank or remittance statement.
+///
+/// The file itself is parsed and discarded; what is kept is its rows, its checksum and who
+/// imported it. The checksum is unique per school, which is what stops the same export
+/// being imported twice and doubling every line a bursar then has to work through.
+model BankStatementImport {
+  id       String             @id @default(uuid()) @db.Uuid
+  schoolId String             @map("school_id") @db.Uuid
+  /// Which institution the statement came from, so a line is matched against payments
+  /// that claim to have gone through the same one.
+  provider PaymentProviderKey
+
+  /// What the bank calls the account. Free text: every bank formats it differently, and
+  /// it is shown to a bursar rather than parsed.
+  accountLabel String? @map("account_label")
+
+  fileName String @map("file_name")
+  /// SHA-256 of the uploaded bytes. Unique per school: the same file is not imported
+  /// twice, and a re-export with one new line is a different file.
+  checksum String
+
+  /// The range the rows actually cover, derived from them rather than typed by the
+  /// uploader — a statement's own dates are more trustworthy than a person's memory.
+  periodStart DateTime? @map("period_start") @db.Date
+  periodEnd   DateTime? @map("period_end") @db.Date
+
+  lineCount Int     @map("line_count")
+  /// Sum of the MONEY_IN lines, as imported. Kept because it is a property of the file —
+  /// a figure to reconcile *against*, not a derived balance that could drift.
+  totalIn   Decimal @map("total_in") @db.Decimal(14, 2)
+  totalOut  Decimal @map("total_out") @db.Decimal(14, 2)
+  currency  String  @db.VarChar(3)
+
+  importedByUserId String   @map("imported_by_user_id") @db.Uuid
+  importedAt       DateTime @default(now()) @map("imported_at") @db.Timestamptz(3)
+  notes            String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  school     School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  importedBy User                @relation("StatementImporter", fields: [importedByUserId], references: [id], onDelete: Restrict)
+  lines      BankStatementLine[]
+
+  @@unique([schoolId, checksum])
+  @@index([schoolId, importedAt])
+  @@map("bank_statement_imports")
+}
+
+/// One line from a statement. Insert-only; matching updates the decision, never the line.
+///
+/// The amount, date and narrative are exactly what the bank said. They are never edited
+/// to make a match work: a line that does not fit a payment is a question about the
+/// payment, not a typo to correct (Section 20).
+model BankStatementLine {
+  id       String @id @default(uuid()) @db.Uuid
+  schoolId String @map("school_id") @db.Uuid
+  importId String @map("import_id") @db.Uuid
+
+  /// 1-based, counting the header, so it matches the row the bursar sees in the file.
+  lineNumber Int      @map("line_number")
+  valueDate  DateTime @map("value_date") @db.Date
+  /// The bank's own description. Where an automatic match finds its reference.
+  narrative  String
+  /// A reference column, where the bank provides one separately.
+  reference  String?
+
+  amount    Decimal                @db.Decimal(14, 2)
+  currency  String                 @db.VarChar(3)
+  direction BankStatementDirection
+
+  matchStatus      StatementLineMatchStatus @default(UNMATCHED) @map("match_status")
+  /// The payment this line is attributed to. A partial unique index enforces one line per
+  /// payment: two statement lines claiming the same payment would mean the school had
+  /// been paid twice and noticed once.
+  matchedPaymentId String?                  @map("matched_payment_id") @db.Uuid
+  /// Null when the automatic pass matched it, which is why it is separate from `matchedAt`.
+  matchedByUserId  String?                  @map("matched_by_user_id") @db.Uuid
+  matchedAt        DateTime?                @map("matched_at") @db.Timestamptz(3)
+  /// Why a line was ignored, or what a person saw when they matched it. Required to
+  /// ignore, because "not ours" without a reason is indistinguishable from carelessness.
+  matchNote        String?                  @map("match_note")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(0)
+
+  school         School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  import         BankStatementImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+  matchedPayment Payment?            @relation(fields: [matchedPaymentId], references: [id], onDelete: SetNull)
+  matchedBy      User?               @relation("StatementMatcher", fields: [matchedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([importId, lineNumber])
+  // The reconciliation worklist: unmatched money-in lines, oldest first.
+  @@index([schoolId, matchStatus, valueDate])
+  @@index([importId, lineNumber])
+  @@index([matchedPaymentId])
+  @@map("bank_statement_lines")
 }
 
 /// ------------------------------------------------------------------- audit trail
@@ -1637,7 +2265,7 @@ model AuditLog {
   schoolId String? @map("school_id") @db.Uuid
 
   /// Null for an action by an unauthenticated caller, e.g. a failed sign-in.
-  actorUserId String? @map("actor_user_id") @db.Uuid
+  actorUserId  String? @map("actor_user_id") @db.Uuid
   /// Captured at the time of the action, because a user's roles can change later.
   actorRoleKey String? @map("actor_role_key")
 

@@ -51,7 +51,7 @@ through the `pg` driver adapter in `backend/src/lib/prisma.ts`.
 | `CORS_ORIGINS`            | no       | `http://localhost:5173` | Comma-separated exact origins; trimmed and de-duplicated. In production a wildcard is rejected, and so is any non-HTTPS origin other than localhost.                                                                                                                                                 |
 | `RATE_LIMIT_WINDOW_MS`    | no       | `60000`                 | Global limiter window.                                                                                                                                                                                                                                                                               |
 | `RATE_LIMIT_MAX_REQUESTS` | no       | `300`                   | Global requests per window per IP. Auth, payment and webhook routes add their own tighter limits.                                                                                                                                                                                                    |
-| `JSON_BODY_LIMIT`         | no       | `256kb`                 | Maximum JSON body. File uploads get their own limits when they arrive in Phase 5.                                                                                                                                                                                                                    |
+| `JSON_BODY_LIMIT`         | no       | `256kb`                 | Maximum JSON body, and the cap on a raw webhook body. File uploads have their own limits: `UPLOAD_MAX_BYTES` below, and 5MB for a statement import.                                                                                                                                                  |
 | `TRUST_PROXY_HOPS`        | no       | `0`                     | Number of reverse proxies in front of the API. **Set this correctly in production.** An explicit hop count is used instead of `trust proxy: true`, because trusting any `X-Forwarded-For` would let a client forge its IP and evade rate limiting — and would corrupt the IP recorded in audit logs. |
 
 ### Authentication
@@ -77,6 +77,47 @@ the API refuses to start without them rather than starting insecurely.
 
 `Secure` is forced on for the refresh cookie in production regardless of configuration.
 
+### Payments (Phase 5)
+
+The sandbox provider is a **local simulator, not a bank**. It makes no outbound request to
+anything and settles only when a correctly signed callback is posted to
+`/api/v1/payment-webhooks/SANDBOX`, which is what makes the whole provider path — initiation,
+signature verification, replay rejection, transactional finalisation — exercisable in
+development and CI without credentials, without a network and without real money.
+
+**The API refuses to start with the sandbox enabled when `NODE_ENV=production.`** A simulator
+that can mint payment confirmations must not be reachable anywhere a confirmation credits a
+real student's account. The webhook secret is validated in _every_ environment, not only
+production, because a developer whose machine credits payments on an unsigned POST learns the
+wrong lesson about what that endpoint guarantees.
+
+| Variable                           | Required             | Default | Notes                                                                                                                                                                                                                    |
+| ---------------------------------- | -------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PAYMENT_SANDBOX_ENABLED`          | no                   | `false` | Enables the simulator. **Rejected outright in production.**                                                                                                                                                              |
+| `PAYMENT_SANDBOX_WEBHOOK_SECRET`   | when sandbox enabled | —       | HMAC-SHA256 key for signing and verifying sandbox callbacks. At least 32 characters, no default anywhere: a known webhook secret is a forgeable payment confirmation, which is a forgeable credit to a family's account. |
+| `PAYMENT_WEBHOOK_MAX_SKEW_SECONDS` | no                   | `120`   | How far a callback's signed timestamp may be from the server clock before it is refused as a **replay**. Range 10–900. Anything older than the window is a captured request being sent again.                            |
+
+Credentials for the three named Rwandan channels are deliberately absent: no adapter exists
+for them yet, because whether they offer a payment-notification API is still unconfirmed (see
+[OPEN-QUESTIONS.md](OPEN-QUESTIONS.md) #1 and #2). They are collected through the manual
+verification workflow, which needs no credentials at all.
+
+### Proof-of-payment uploads (Phase 5)
+
+| Variable              | Required | Default         | Notes                                                                                                                                                                                                             |
+| --------------------- | -------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `UPLOAD_STORAGE_PATH` | no       | `./var/uploads` | Where bank slips and transfer confirmations are written. **Must be outside any web-servable path.** The API serves no static files at all, so this holds by construction rather than by configuration discipline. |
+| `UPLOAD_MAX_BYTES`    | no       | `5242880` (5MB) | Per-file ceiling, 1KB–25MB. A bank slip is a photo or a one-page PDF.                                                                                                                                             |
+
+Bank statements are **not** written to this path. A statement is a transport for rows that are
+themselves stored, so it is parsed in memory and discarded, with only its SHA-256 kept so the
+same export cannot be imported twice. A bank slip is evidence behind one credit and has to
+still be there years later, which is why it is stored.
+
+No malware scanner is configured. `payment_evidence.scan_state` records `SKIPPED` honestly
+rather than defaulting to `CLEAN`, so a bursar opening a slip can tell an unscanned file from a
+clean one — see [SECURITY.md](SECURITY.md).
+
 ### Local infrastructure (docker-compose)
 
 | Variable            | Default                  | Notes                                                                                                                                                                         |
@@ -101,12 +142,12 @@ given a `VITE_` name.
 
 These are listed so the deployment story is not a surprise later. They are not read yet.
 
-| Variable                                  | Phase | Purpose                                                                            |
-| ----------------------------------------- | ----- | ---------------------------------------------------------------------------------- |
-| `PAYMENT_PROVIDER_*`                      | 5     | Per-adapter credentials and webhook signing secrets.                               |
-| `UPLOAD_STORAGE_PATH`, `UPLOAD_MAX_BYTES` | 5     | Proof-of-payment and bank statement uploads, stored outside any web-servable path. |
-| `SMS_PROVIDER_*`, `SMTP_*`                | 6     | Notification channels.                                                             |
-| `ERROR_TRACKING_DSN`                      | 14    | Error reporting.                                                                   |
+| Variable                   | Phase | Purpose                                                                                                                        |
+| -------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `PAYMENT_PROVIDER_*`       | —     | Per-adapter credentials, once a Rwandan channel's integration is confirmed. One block per adapter, alongside the sandbox pair. |
+| `CONTENT_SCANNER_*`        | —     | A malware scanner for uploaded proof of payment, once the school provides one. The port exists; the adapter does not.          |
+| `SMS_PROVIDER_*`, `SMTP_*` | 6     | Notification channels.                                                                                                         |
+| `ERROR_TRACKING_DSN`       | 14    | Error reporting.                                                                                                               |
 
 ## Secrets handling
 

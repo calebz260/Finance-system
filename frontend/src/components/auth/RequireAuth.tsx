@@ -22,9 +22,23 @@ export interface RequireAuthProps {
   readonly children: ReactNode;
   /** Every listed permission is required, matching `requirePermission` on the server. */
   readonly permissions?: readonly PermissionKey[];
+  /**
+   * Any one of the listed permissions admits the route, matching `requireAnyPermission`
+   * on the server.
+   *
+   * For the screens a route reaches two ways: a bursar opening the payments table with
+   * `payment.read`, and a parent opening the same screen — scoped to their own children
+   * by the server — with `own.financials_read`. Requiring both would hide it from each of
+   * them for want of the other's permission.
+   */
+  readonly anyPermission?: readonly PermissionKey[];
 }
 
-export function RequireAuth({ children, permissions = [] }: RequireAuthProps): React.JSX.Element {
+export function RequireAuth({
+  children,
+  permissions = [],
+  anyPermission = [],
+}: RequireAuthProps): React.JSX.Element {
   const { status, user, can } = useAuth();
   const location = useLocation();
 
@@ -55,6 +69,10 @@ export function RequireAuth({ children, permissions = [] }: RequireAuthProps): R
 
   const missing = permissions.filter((permission) => !can(permission));
   if (missing.length > 0) {
+    return <Navigate to="/" replace />;
+  }
+
+  if (anyPermission.length > 0 && !anyPermission.some((permission) => can(permission))) {
     return <Navigate to="/" replace />;
   }
 

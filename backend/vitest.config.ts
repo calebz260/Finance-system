@@ -37,6 +37,24 @@ const sharedEnv = {
   MFA_CHALLENGE_TTL_MINUTES: '5',
   MAX_FAILED_LOGIN_ATTEMPTS: '5',
   ACCOUNT_LOCK_MINUTES: '15',
+
+  // The sandbox payment provider is a local simulator that settles only on a correctly
+  // signed callback, which is what makes the whole provider path — initiation, signature
+  // verification, replay rejection, finalisation — testable without a bank or real money.
+  // `config/env.ts` refuses to start with it enabled in production.
+  PAYMENT_SANDBOX_ENABLED: 'true',
+  // An obviously-fake fixture, like the two above, and long enough for the 32-character
+  // floor the configuration enforces.
+  PAYMENT_SANDBOX_WEBHOOK_SECRET: 'test-only-sandbox-webhook-secret-0123456789abcdef',
+  // Tight, so the replay-rejection case can be written without faking timers: a callback
+  // signed two minutes ago is already outside it.
+  PAYMENT_WEBHOOK_MAX_SKEW_SECONDS: '60',
+
+  // Proof-of-payment uploads land under the backend's own `var/` directory, which is
+  // git-ignored and outside anything servable. A test that uploads a bank slip writes a
+  // real file, because "the bytes came back unchanged" is part of what is being tested.
+  UPLOAD_STORAGE_PATH: './var/test-uploads',
+  UPLOAD_MAX_BYTES: String(2 * 1024 * 1024),
 };
 
 export default defineConfig({

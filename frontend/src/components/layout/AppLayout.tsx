@@ -29,6 +29,12 @@ const NAVIGATION: readonly NavigationItem[] = [
   { label: 'Academic setup', to: '/academic', permission: Permission.ACADEMIC_READ },
   { label: 'Fee setup', to: '/fees', permission: Permission.FEE_STRUCTURE_READ },
   { label: 'Raise charges', to: '/fees/charge-runs', permission: Permission.CHARGE_READ },
+  { label: 'Payments', to: '/payments', permission: Permission.PAYMENT_READ },
+  { label: 'Reconciliation', to: '/reconciliation', permission: Permission.RECONCILIATION_READ },
+  // The family's two entries. Listed on `own.*` permissions, which no staff role holds,
+  // so a parent sees "Pay fees" and "My payments" where a bursar sees "Payments".
+  { label: 'Pay fees', to: '/payments/pay', permission: Permission.OWN_FINANCIALS_READ },
+  { label: 'My payments', to: '/payments', permission: Permission.OWN_FINANCIALS_READ },
   { label: 'User accounts', to: '/users', permission: Permission.USER_READ },
   { label: 'Your account', to: '/account' },
 ];
@@ -102,8 +108,10 @@ export function AppLayout({ children }: AppLayoutProps): React.JSX.Element {
         {visibleItems.length > 0 ? (
           <nav aria-label="Main navigation" className="lg:w-56 lg:shrink-0">
             <ul className="flex gap-2 overflow-x-auto lg:flex-col lg:overflow-visible">
+              {/* Keyed by label as well as path: the payments list appears twice, once
+                  for staff and once for a family, worded for each of them. */}
               {visibleItems.map((item) => (
-                <li key={item.to}>
+                <li key={`${item.label}-${item.to}`}>
                   <NavLink
                     to={item.to}
                     end={item.to === '/'}

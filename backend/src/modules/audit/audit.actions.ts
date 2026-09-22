@@ -109,6 +109,56 @@ export const AuditAction = {
 
   SCHOLARSHIP_CREATED: 'scholarship.created',
   SCHOLARSHIP_UPDATED: 'scholarship.updated',
+
+  // --- payments (Phase 5)
+  //
+  // Every event that changes what the school believes about money arriving. The
+  // verification and reversal entries are the ones an auditor reads first, so they carry
+  // the before/after amount and the ledger entry id in their state payload.
+  PAYMENT_INITIATED: 'payment.initiated',
+  /** A retried initiation answered from the existing payment. Recorded, not silent. */
+  PAYMENT_INITIATION_REPLAYED: 'payment.initiation.replayed',
+  /** The same idempotency key presented for a materially different request. */
+  PAYMENT_IDEMPOTENCY_CONFLICT: 'payment.idempotency.conflict',
+  PAYMENT_TRANSACTION_CREATED: 'payment.transaction.created',
+  PAYMENT_PROVIDER_RESPONDED: 'payment.provider.responded',
+  PAYMENT_STATUS_CHANGED: 'payment.status.changed',
+  PAYMENT_VERIFIED: 'payment.verified',
+  PAYMENT_VERIFICATION_FAILED: 'payment.verification.failed',
+  PAYMENT_HELD_FOR_REVIEW: 'payment.held_for_review',
+  PAYMENT_CANCELLED: 'payment.cancelled',
+  PAYMENT_REVERSED: 'payment.reversed',
+  PAYMENT_REFUNDED: 'payment.refunded',
+
+  // --- manual payment claims (Phase 5)
+  MANUAL_CLAIM_RECORDED: 'payment.manual_claim.recorded',
+  MANUAL_CLAIM_VERIFIED: 'payment.manual_claim.verified',
+  MANUAL_CLAIM_REJECTED: 'payment.manual_claim.rejected',
+  /** A verification refused because the verifier was the submitter (Section 13B). */
+  MANUAL_CLAIM_SELF_VERIFICATION_BLOCKED: 'payment.manual_claim.self_verification_blocked',
+  EVIDENCE_UPLOADED: 'payment.evidence.uploaded',
+  EVIDENCE_SUPERSEDED: 'payment.evidence.superseded',
+  EVIDENCE_DOWNLOADED: 'payment.evidence.downloaded',
+  EVIDENCE_REJECTED: 'payment.evidence.rejected',
+
+  // --- provider callbacks (Phase 5)
+  //
+  // Both outcomes are audited. One bad signature is a misconfiguration; a stream of them
+  // is someone forging confirmations, and only the recorded failures make that visible.
+  WEBHOOK_RECEIVED: 'payment.webhook.received',
+  WEBHOOK_REJECTED: 'payment.webhook.rejected',
+  WEBHOOK_DUPLICATE_IGNORED: 'payment.webhook.duplicate_ignored',
+
+  // --- reconciliation (Phase 5)
+  //
+  // Attribution is audited separately from verification, because they are separate
+  // claims: "this line is that payment" and "and therefore credit the account". A
+  // reconciliation that credited would show both entries, and one that only matched shows
+  // the first — which is what tells a reviewer what a bursar actually decided.
+  STATEMENT_IMPORTED: 'reconciliation.statement.imported',
+  STATEMENT_LINE_MATCHED: 'reconciliation.line.matched',
+  STATEMENT_LINE_UNMATCHED: 'reconciliation.line.unmatched',
+  STATEMENT_LINE_IGNORED: 'reconciliation.line.ignored',
 } as const;
 
 export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];
@@ -140,6 +190,12 @@ export const AuditEntity = {
   FEE_WAIVER: 'FeeWaiver',
   FINANCIAL_ADJUSTMENT: 'FinancialAdjustment',
   FINANCIAL_ENTRY: 'FinancialEntry',
+  PAYMENT: 'Payment',
+  PAYMENT_TRANSACTION: 'PaymentTransaction',
+  PAYMENT_EVIDENCE: 'PaymentEvidence',
+  PAYMENT_WEBHOOK_EVENT: 'PaymentWebhookEvent',
+  BANK_STATEMENT_IMPORT: 'BankStatementImport',
+  BANK_STATEMENT_LINE: 'BankStatementLine',
 } as const;
 
 export type AuditEntity = (typeof AuditEntity)[keyof typeof AuditEntity];

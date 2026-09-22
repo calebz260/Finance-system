@@ -104,11 +104,44 @@ void posts an opposing entry rather than deleting a row, and that a Finance Mana
 approve their own request. The assertion in most of those is the **balance**, not a row count —
 a double charge shows up there even when every individual record looks right.
 
-**Phase 5** — successful, failed, pending, cancelled, reversed and refunded payments; a
-duplicate webhook does not double-credit; an invalid signature is rejected; a mismatched
-amount or reference is rejected; replayed webhooks are rejected; idempotency keys prevent
-duplicate transactions; a manual claim does not affect the ledger until confirmed; confirm
-and reject paths both audit correctly; statement import matches and flags exceptions.
+**Phase 5** — every one of the above, and all of it asserted against the **balance** rather
+than against a status field, because a double credit shows up there even when each individual
+record looks correct.
+
+| Suite                                        | What it holds the line on                                                                                                                                           |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unit/payment-status.test.ts`                | The status machine: no exit from a terminal state, SUCCESSFUL reachable only from a live one, and a repeat classified as already-applied rather than as a fault.    |
+| `unit/file-storage.test.ts`                  | What an upload is judged to be (its bytes, never its name), the opaque storage key, and the size and type refusals. Real files, written and read back.              |
+| `unit/matching.test.ts`                      | That the matcher declines to guess: a quoted reference with a different amount is _not_ a match, two equal candidates are ambiguity, money out is never attributed. |
+| `unit/statement-parser.test.ts`              | The shapes real bank exports arrive in — credits-only, separate credit/debit columns, a signed amount, thousands separators, accounting parentheses.                |
+| `integration/payments.test.ts`               | The whole payment path over HTTP, including the cases below.                                                                                                        |
+| `integration/reconciliation.test.ts`         | Import, automatic matching, the duplicate-file refusal, match-and-credit, and the refusals around a credited line.                                                  |
+| `frontend/pages/PaymentDetailPage.test.tsx`  | That the statement amount is typed rather than pre-filled, and that a decision carries the version the screen was showing.                                          |
+| `frontend/pages/ReconciliationPage.test.tsx` | That a candidate whose amount differs cannot be accepted at all, and that crediting is a separate, confirmed action.                                                |
+
+The cases worth naming individually, because each of them is a way a school could be told the
+wrong thing about its own money:
+
+- a provider callback delivered **three times** produces exactly **one** ledger entry;
+- two _distinct_ callbacks both reporting success also produce one;
+- a forged signature and a stale timestamp are both refused, both recorded in
+  `payment_webhook_events`, and both credit nothing;
+- a confirmation whose amount disagrees with the claim credits **neither** figure and parks the
+  payment for review;
+- a success reported with **no** amount is held rather than assumed to be the amount requested;
+- a late "success" cannot resurrect a payment that already failed;
+- the bursar who recorded a claim cannot confirm it, and the blocked attempt is audited;
+- a parent reaches their own children and nobody else's — asserted as a 404, not a 403, so the
+  test also pins down that the refusal discloses nothing;
+- a reversal posts an opposing entry, leaves the original intact, and cannot be applied twice;
+- an idempotency key replays the original payment, and the same key on a different request is
+  refused;
+- two identical requests arriving **together** produce one payment and one provider attempt —
+  the race the key exists for, exercised with `Promise.all` rather than described in a comment;
+- a payment whose provider accepted the request and then went quiet can be parked by a bursar
+  and resolved from there, in two deliberate steps;
+- a statement line and a payment of different amounts cannot be matched at all;
+- a line that has credited a payment cannot be detached from it.
 
 **Phase 9** — batch promotion; mid-term withdrawal proration under each configured policy.
 

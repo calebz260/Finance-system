@@ -16,7 +16,7 @@
 import { useState } from 'react';
 
 import { PermissionKey, type ReliefKind, type ReliefSummary } from '@sfs/shared';
-import { useParams } from 'react-router';
+import { Link, useParams } from 'react-router';
 
 import { useAuth } from '../auth/auth-context';
 import { Alert } from '../components/ui/Alert';
@@ -181,12 +181,20 @@ export function StudentFinancialsPage(): React.JSX.Element {
                   </Alert>
                 ) : null}
 
-                {data.balance.totalPaid === '0.00' ? (
-                  <p className="mt-4 text-xs text-slate-500">
-                    Payments arrive in Phase 5. Until then the outstanding figure is charges plus
-                    surcharges, less approved relief.
-                  </p>
-                ) : null}
+                <p className="mt-4 text-xs text-slate-500">
+                  The outstanding figure is charges plus authorised surcharges, less approved relief
+                  and verified payments. A payment counts here only once somebody has verified it.
+                </p>
+
+                <p className="mt-2 text-sm">
+                  <Link
+                    className="font-medium text-brand-700 hover:underline dark:text-brand-300"
+                    to={`/payments?studentId=${studentId}`}
+                  >
+                    See this student&rsquo;s payments, including anything still awaiting
+                    verification
+                  </Link>
+                </p>
               </CardBody>
             </Card>
 

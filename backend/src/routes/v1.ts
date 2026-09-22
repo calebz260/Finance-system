@@ -27,6 +27,8 @@ import {
   createStudentFinancialRouter,
 } from '../modules/fees/fee.routes.js';
 import { createHealthRouter } from '../modules/health/health.routes.js';
+import { createPaymentRouter } from '../modules/payments/payment.routes.js';
+import { createReconciliationRouter } from '../modules/reconciliation/reconciliation.routes.js';
 import {
   createEnrollmentRouter,
   createGuardianLinkRouter,
@@ -71,8 +73,19 @@ export function createApiV1Router(options: CreateAppOptions = {}): Router {
   router.use('/scholarships', createScholarshipRouter());
   router.use('/relief', createReliefRouter());
 
+  // What has actually been paid, and what the school believes about it.
+  //
+  // `/payment-webhooks` is deliberately **not** here: a provider callback needs the raw
+  // request body to verify its signature, so it is mounted in `app.ts` ahead of the JSON
+  // parser. Putting it in this router would place it after the parser and make the
+  // signature check meaningless.
+  router.use('/payments', createPaymentRouter());
+
+  // The school's own bank account against its own records: what arrived that nobody has
+  // attributed, and what was claimed that the bank has no record of.
+  router.use('/reconciliation', createReconciliationRouter());
+
   // Mounted in later phases:
-  //   /payments, /reconciliation                                          Phase 5
   //   /receipts        Phase 6
   //   /reports         Phase 8
   //   /clearance       Phase 10
