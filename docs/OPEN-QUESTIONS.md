@@ -6,33 +6,41 @@ answer differs. They are listed in the order they start to matter.
 
 ---
 
-## 1. Bank of Kigali integration type — _needed by Phase 5_
+## 1. Bank of Kigali integration type — _still open; Phase 5 shipped without it_
 
 **Question.** For the school's BK collection account, does BK offer a real-time payment
 notification API or webhook, or only a fixed collection account number reconciled from
 statements?
 
-**Working assumption.** BK is the most likely of the three channels to expose a real API, so
-the sandbox/mock provider adapter is built against it. If it turns out to be
-statement-reconciled, BK routes through the manual verification workflow instead.
+**Working assumption.** Statement-reconciled, until confirmed otherwise. **No adapter has been
+written for BK**, no endpoint has been guessed and no credential is assumed. It is registered in
+`provider.registry.ts` as a manual channel: a real way to pay the school, verified by a bursar
+against a statement, and reconciled through the statement import.
 
-**Impact if different.** None architecturally — the provider port and the manual workflow are
-both built regardless. It only changes which adapter is real and which is a stub.
+**What Phase 5 built instead.** The provider port, one sandbox adapter that exercises the whole
+provider path (signature verification, replay rejection, transactional finalisation) without a
+bank, and the manual verification workflow that BK currently routes through. `GET
+/payments/methods` reports `isAvailable: false` with a reason for any channel that cannot
+collect, so no parent is shown a button that fails.
+
+**Impact if answered.** Write the adapter against the documented API, register it, and flip the
+channel's verification method to `PROVIDER`. Nothing in the payment domain, the ledger or the
+balance changes — which is the whole point of the port.
 
 **Who can answer.** BK corporate/business banking, for this specific account.
 
 ---
 
-## 2. Zigama CSS and Umwarimu SACCO integration type — _needed by Phase 5_
+## 2. Zigama CSS and Umwarimu SACCO integration type — _still open; Phase 5 shipped without it_
 
 **Question.** Do either expose a payment-notification API for school fees, or does the school
 receive a remittance/statement to reconcile?
 
-**Working assumption.** Statement-reconciled (manual verification path). No API is assumed to
-exist until confirmed.
+**Working assumption.** Statement-reconciled, through the manual verification path and the
+statement import. No API is assumed to exist until confirmed, and no adapter exists for either.
 
-**Impact if different.** An additional adapter per channel; no change to the ledger or
-reconciliation logic.
+**Impact if answered.** One adapter per channel; no change to the ledger, the payment domain or
+reconciliation.
 
 ---
 
@@ -109,17 +117,23 @@ it does not change the architecture. Worth confirming before Phase 7 so it can b
 
 ---
 
-## 8. Separation of duties on manual verification — _needed by Phase 5_
+## 8. Separation of duties on manual verification — _implemented on the working assumption_
 
 **Question.** Should the system _enforce_ that the bursar who verifies a manual payment claim
 is not the one who submitted it, or only record both identities and flag self-verification in
 reports?
 
-**Working assumption.** Enforce it by default, with a school-level configuration flag to relax
-it — a small school may have only one bursar, in which case a hard block would make the system
-unusable. Self-verification, where permitted, is flagged in the reconciliation report.
+**Working assumption, now built.** Enforced by default and relaxable per school through
+`school_settings.enforce_verification_separation_of_duties`. A blocked attempt is audited as
+`payment.manual_claim.self_verification_blocked` before it is refused, so repeated attempts are
+visible rather than invisible — and where a school does relax the rule, the same audit trail
+records who verified what. The check applies to verification by hand and to crediting from
+reconciliation, which is the same act reached a different way.
 
-**Impact if different.** One authorisation check and one configuration field.
+**Still to confirm.** Whether a school that relaxes the flag wants self-verified payments
+flagged in the Phase 8 reconciliation report as well as in the audit log.
+
+**Impact if different.** One report column.
 
 ---
 
@@ -133,3 +147,49 @@ Parent/student accounts are password-only with standard password reset. The impl
 role-driven, so extending it later is a configuration change.
 
 **Impact if different.** Configuration, plus parent-facing enrolment guidance.
+
+---
+
+## 10. How a student account reaches its own records — _needed by Phase 5, blocking a role_
+
+**Question.** How should a `STUDENT` login be connected to the `Student` record it belongs to?
+By a link on the student row, by an explicit account-claim step, or should self-service be
+guardian-only and the student role dropped?
+
+**Why it is open.** The `STUDENT` role holds `own.financials_read` and `own.receipt_read`, but
+nothing in the schema connects a `User` to the `Student` they are. There is no defensible rule
+to invent for it: matching on email address would be wrong the first time a family shares one,
+and guessing a linkage inside the module that guards financial data is exactly the kind of
+invented business rule this project rules out.
+
+**Working assumption.** Self-service access resolves through the **guardian link only**. A
+student account therefore reaches no financial records at all — it fails closed, which is the
+safe direction, and `payment.access.ts` says so in as many words rather than leaving a silent
+gap.
+
+**Impact if different.** A nullable `student.user_id` (or an explicit claim workflow), one more
+branch in `resolveStudentFinancialAccess`, and the parent-portal screens re-pointed at it. No
+change to payments, the ledger or reconciliation.
+
+**Who can answer.** The school: whether students are issued their own logins at all, which for
+a day/boarding secondary school is as much a policy question as a technical one.
+
+---
+
+## 11. What a school wants done with an unattributable deposit — _needed by Phase 7_
+
+**Question.** When money arrives that no payment claim accounts for — a parent who paid without
+quoting a reference and never told the school — what should happen to it? Hold it unattributed
+indefinitely, credit it against the family once identified by other means, or return it?
+
+**Why it is open.** Phase 5 makes the situation visible and refuses to guess: the line sits
+`UNMATCHED` and appears in the reconciliation summary as money the school holds and cannot
+explain. What it does not do is decide the school's policy for resolving it.
+
+**Working assumption.** It stays unattributed and visible until a person attributes it to a
+payment or sets it aside with a reason. Nothing expires it, and nothing writes it off.
+
+**Impact if different.** A suspense-account concept, or an ageing rule with a report behind it.
+Both are additions to reconciliation rather than changes to it.
+
+**Who can answer.** The bursar's office, and probably the school's auditor.

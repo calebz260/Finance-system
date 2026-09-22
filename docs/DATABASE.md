@@ -84,8 +84,9 @@ rather than silently overwriting.
 ### The financial ledger
 
 From Phase 4, **a balance is never stored and never derived from business records.**
-`financial_entries` is the authoritative ledger: charges, discounts, scholarship awards, waivers
-and adjustments each post one row when they take effect, and a balance is
+`financial_entries` is the authoritative ledger: charges, discounts, scholarship awards,
+waivers, adjustments and — from Phase 5 — verified payments each post one row when they take
+effect, and a balance is
 
 ```sql
 SUM(amount) FILTER (WHERE entry_type = 'DEBIT')
@@ -104,6 +105,46 @@ impossible under a retry or two concurrent approvals rather than merely unlikely
 There is deliberately **no balance column on any table**, and no `remainingAmount`, `totalPaid`
 or `paidAt` on a charge: whether a charge is settled is derived, because a stored answer is one
 a bug or a migration can set wrongly.
+
+Adding payments cost this shape nothing, which was the point of it: `PAYMENT` became one more
+value of `financial_entry_source`, a verified payment posts a CREDIT, a reversal or refund posts
+the opposing DEBIT, and the formula above is untouched. `totalPaid` simply stopped being zero.
+
+### Payments (Phase 5)
+
+Five tables, and each of them exists because of a specific failure it prevents:
+
+| Table                    | Why it is separate                                                                                                                                                                                                                       |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `payments`               | What the school was asked to collect. `SUCCESSFUL` is the only status that has credited the ledger, and check constraints refuse one without a verifier, a terminal status without a completion timestamp, and cash with a provider key. |
+| `payment_transactions`   | One attempt against a provider. Genuinely one-to-many: a payer whose first prompt timed out tries again, and the first attempt may still settle — the case that becomes a duplicate credit if attempts are collapsed into one row.       |
+| `payment_status_history` | How a payment reached its current state. A status column cannot answer that: PENDING → REQUIRES_REVIEW → SUCCESSFUL looks identical to verified-first-time unless the middle step was written down.                                      |
+| `payment_evidence`       | Proof behind a credit. Insert-only: replacing a slip supersedes the old row rather than overwriting it. The file lives outside the database and outside any web-servable path, keyed by an opaque server-generated `storage_key`.        |
+| `payment_webhook_events` | Every inbound callback, verified or not, written **before** the callback is acted on. `(provider_key, event_id)` is unique, which is what makes webhook handling idempotent.                                                             |
+
+The index that matters most is `financial_entries_one_opening_per_payment`: one partial unique
+index on `(payment_id) WHERE source = 'PAYMENT' AND reversal_of_entry_id IS NULL`. Two
+simultaneous callbacks, a provider retrying after a timeout, a bursar double-clicking Verify and
+two concurrent finalisation transactions all end up attempting a second insert there, and all of
+them lose. It is scoped to opening entries so the compensating DEBIT a reversal posts remains
+possible.
+
+### Reconciliation (Phase 5)
+
+`bank_statement_imports` and `bank_statement_lines` hold what the bank said, and only that. A
+line's date, narrative and amount are never edited to make a match work: a line that does not
+fit a payment is a question about the payment, not a typo to correct.
+
+- The import's `checksum` is unique per school, so the same export cannot be imported twice and
+  double a month's work.
+- `bank_statement_lines_one_line_per_payment`, a partial unique index on `matched_payment_id`,
+  enforces one line per payment and one payment per line. Two lines claiming one payment would
+  mean the bank paid the school twice and the school recorded it once.
+- A check constraint refuses a `MATCHED` line with no payment, an unmatched line still holding
+  one, an `IGNORED` line with no reason, and any attribution of a `MONEY_OUT` line — a bank
+  charge credited to a family is money the school never received.
+- Statement **files** are not stored: a statement is a transport for rows that are themselves
+  stored. Proof of payment is the opposite and is stored. See [SECURITY.md](SECURITY.md).
 
 ### Deletion
 
@@ -149,10 +190,17 @@ Rules:
 npm run db:seed --workspace @sfs/backend
 ```
 
-The seed refuses to run when `NODE_ENV=production`. From Phase 1 it creates a school, roles
-and permissions, a test account per role, academic years and terms, classes and programmes,
-students and parents, fee structures, and both online and manually verified payments — all
-fictional. It must never contain real personal information.
+The seed refuses to run when `NODE_ENV=production`. It creates a school, roles and permissions,
+a test account per role, academic years and terms, classes and programmes, students and
+parents, fee categories, scholarship programmes and active fee structures — all fictional. It
+must never contain real personal information.
+
+**It raises no charges and records no payments**, and that is deliberate rather than
+unfinished. The seed configures what a school charges; it does not bill a term or bank money.
+Seeded charges would put obligations in the ledger that nobody authorised, and seeded payments
+would put credits there that nobody verified — which is precisely the property Phases 4 and 5
+are built to guarantee. A developer who wants either runs the charge run and the payment flow,
+which is also the only way to see that they work.
 
 ## Local operations
 

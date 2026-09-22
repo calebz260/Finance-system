@@ -18,7 +18,7 @@
  * Allocation must run inside the same transaction as the insert that consumes it, so a
  * failed registration does not leave a gap.
  */
-import { formatReceiptNumber, formatStudentId } from '@sfs/shared';
+import { formatPaymentReference, formatReceiptNumber, formatStudentId } from '@sfs/shared';
 
 import { SequenceKind } from '../generated/prisma/enums.js';
 import type { PrismaTransactionClient } from './prisma.js';
@@ -75,6 +75,30 @@ export async function allocateStudentId(
   const identifier = formatStudentId(args.admissionYear, sequence);
   if (args.prefix === undefined || args.prefix === 'STU') return identifier;
   return identifier.replace(/^STU-/, `${args.prefix}-`);
+}
+
+/**
+ * Allocate the next payment reference, e.g. `PAY-2026-000001234`.
+ *
+ * Same counter mechanism as a Student ID, and for the same reason: this is the identifier
+ * a parent quotes over the phone and the one reconciliation will join on, so two payments
+ * sharing it would make a statement line impossible to attribute. Allocated inside the
+ * caller's transaction, so an initiation that rolls back leaves no gap.
+ *
+ * The prefix is fixed in Phase 5 rather than school-configurable. The database check
+ * constrains the *shape* (`AAA-YYYY-NNNNNNNNN`), so making it configurable later is a
+ * settings column and no migration to the payments table.
+ */
+export async function allocatePaymentReference(
+  tx: PrismaTransactionClient,
+  args: { schoolId: string; year: number },
+): Promise<string> {
+  const sequence = await nextSequenceValue(tx, {
+    schoolId: args.schoolId,
+    kind: SequenceKind.PAYMENT,
+    year: args.year,
+  });
+  return formatPaymentReference(args.year, sequence);
 }
 
 /** Allocate the next receipt number, e.g. `RCP-2026-000001234`. */

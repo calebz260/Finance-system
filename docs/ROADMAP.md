@@ -119,6 +119,10 @@ upload storage, its path rules and malware scanning belong to Phase 5, which own
 handling, and this feature deliberately does not pre-empt that design. Promotion itself is
 Phase 9; the level chain it walks is in place and tested here.
 
+_Outcome:_ Phase 5 kept this decision for import files rather than reversing it. Statements are
+parsed in memory too; only proof of payment — the evidence behind a credit rather than a means
+of getting data in — is stored (ADR-027).
+
 ## ✅ Phase 4 — Fee management
 
 Fee structures scoped by **academic year + term + level/class + programme**, fee items,
@@ -159,7 +163,11 @@ structurally present and always zero — the subtraction is in the formula and t
 introducing payments is a new entry source rather than a change to how money is counted.
 Instalment schedules (OPEN-QUESTIONS #3) wait for the payment validation they exist to serve.
 
-## ⬜ Phase 5 — Payment system (online and manual)
+_Outcome:_ that prediction held. Phase 5 added `PAYMENT` as one more value of an existing enum
+and one more member of an existing union; the balance formula, the posting rules and the
+reversal mechanism were untouched, and `totalPaid` simply stopped being zero.
+
+## ✅ Phase 5 — Payment system (online and manual)
 
 Payment initiation with idempotency keys, transaction records, the provider port with one
 adapter per channel (Bank of Kigali, Zigama CSS, Umwarimu SACCO, plus a sandbox adapter),
@@ -167,11 +175,85 @@ signature-verified webhooks with replay protection, status transitions, **the fu
 verification workflow** (claim → pending verification → bursar confirms against a statement →
 ledger), proof-of-payment upload, bank/remittance statement import, and reconciliation.
 
+**Delivered:**
+
+- **One place where a payment becomes money.** A provider callback, a status query, a bursar
+  pressing Verify and a reconciliation match all arrive at `finalisePayment`, which compares the
+  confirmed amount and currency against the school's own record, then transitions the payment and
+  posts its ledger CREDIT **in one transaction**. There is no state in which a payment reads as
+  successful and no balance reflects it (ADR-023).
+- **Three independent defences against a double credit**, because duplicate delivery is what
+  payment providers normally do: a row lock, a conditional update from the finalisable statuses
+  only, and a partial unique index — the last of which is not application behaviour, so a future
+  code path that forgets to lock still cannot double-credit.
+- **A mismatch is parked, not resolved.** A confirmation that disagrees with the claim credits
+  neither figure; the payment moves to `REQUIRES_REVIEW` with both recorded, and a person
+  decides. A success reported with no amount at all is held too, rather than assumed to be the
+  amount requested.
+- **A terminal status is final, and a repeat is not an error.** A late callback cannot resurrect a
+  failed payment, and a duplicate one is recognised as a repeat and answered from the existing
+  record instead of being processed again (ADR-024).
+- **Webhooks verified against the raw bytes**, with the secret chosen by the path and the signed
+  timestamp inside the digest, so a captured callback is stale rather than reusable. Every
+  delivery is recorded before it is acted on, `(provider_key, event_id)` is unique, and every
+  refusal is stored — one bad signature is a misconfiguration, a stream of them is somebody
+  forging confirmations. The sender is told nothing either way (ADR-025).
+- **The manual verification workflow**, which for every channel this school actually has is the
+  only path there is: a claim recorded by a bursar or submitted by a parent, credited only when a
+  named person confirms it against a statement, and never by the person who submitted it unless
+  the school has deliberately relaxed that setting — with the blocked attempt audited either way.
+- **Proof of payment** stored under an opaque server-generated key outside any web-servable path,
+  typed by its own bytes rather than the browser's claim, served only through an authenticated
+  endpoint that audits every download, and superseded rather than overwritten when replaced.
+  Scan state is recorded as `SKIPPED` honestly, because no scanner is configured (ADR-027).
+- **Bank statement import** for the shapes real exports arrive in — credits-only, separate
+  credit and debit columns, a signed amount, thousands separators, accounting parentheses — with
+  preview-then-commit, every unreadable row reported against the row number the bursar sees, and
+  the same file refused a second time by its checksum.
+- **Reconciliation that reports both sides**: statement lines nobody has attributed are money the
+  school holds and cannot explain, and live payments with no statement line are claims the bank
+  has no record of. The automatic pass attributes a line only when the payment's reference is
+  quoted **and** the amount is exactly equal; everything else is a ranked suggestion carrying the
+  reason it was offered, and two equally plausible candidates are ambiguity rather than a guess
+  (ADR-026).
+- **Undoing is compensating, never destructive.** A reversal (the money never arrived) and a
+  refund (it arrived and was sent back) are separate permissions, neither held by a Bursar, and
+  both keep the original payment and post an opposing ledger entry.
+- Web client: the payments table with the verification queue as a bursar's default view, a
+  payment screen where the statement amount is typed rather than pre-filled, the parent portal's
+  pay-and-claim flow with slip upload, and the reconciliation worklist.
+
+**Test coverage:** 181 tests are new in this phase — 153 backend (65 payment integration, 28
+reconciliation integration, 60 unit across the status machine, file storage, the matcher and
+the statement parser), 22 frontend, and 6 added to the configuration suite for the payment
+settings. The full local verification gate (format, lint, typecheck, test, build) passes
+against PostgreSQL 17. Four migrations: two for payments and two for reconciliation, each
+pairing the tables with the constraints that hold their invariants. **CI has not yet run this
+phase**, so nothing here should be described as shipped.
+
+**Not built, and why:** no live provider adapter. Whether the three named Rwandan channels offer
+a payment-notification API is still unconfirmed (OPEN-QUESTIONS #1 and #2), so none was invented:
+they are registered as manual channels, `GET /payments/methods` says plainly which channels
+cannot collect, and a sandbox simulator — refused outright in production — exercises the whole
+provider path in development and CI. Adding a real adapter is a file plus a registry entry;
+nothing in the payment domain, the ledger or the balance changes.
+
+**Deferred with a reason:** a receipt is not issued on verification — receipt numbers, documents
+and their history are Phase 6, and the sequence counter they need already exists. Instalment
+schedules (OPEN-QUESTIONS #3) still wait on the school's policy. A `STUDENT` login cannot reach
+its own records because nothing links a user to a student row, and inventing that rule inside the
+module that guards financial data is exactly what this project does not do — it fails closed and
+is recorded as OPEN-QUESTIONS #10 rather than left as a silent gap.
+
 ## ⬜ Phase 6 — Receipts and notifications
 
 Unique receipt numbers, printable/downloadable receipts covering both verification methods,
 receipt history, and pluggable notification channels (SMS, email, in-app) with asynchronous
 delivery.
+
+Two seams are already in place waiting for it: the `RECEIPT` identifier sequence and
+`allocateReceiptNumber`, and `PasswordResetDelivery` — the port Phase 2 left behind so a reset
+link has somewhere to go the moment a channel exists.
 
 ## ⬜ Phase 7 — Bursar and finance dashboard
 

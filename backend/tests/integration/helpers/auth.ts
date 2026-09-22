@@ -74,8 +74,19 @@ export async function seedRoleCatalogue(): Promise<Map<string, string>> {
   return roleIds;
 }
 
+/**
+ * A school, with the settings row every school has in production.
+ *
+ * The settings row is created here rather than left out because it is where the payment
+ * policy lives — the currency, the minimum payment, whether part payments are accepted,
+ * whether verification requires a second person. A fixture without it would let a test
+ * exercise those rules against fallback defaults instead of against a real row, which is
+ * not what the deployed system would do.
+ */
 export async function createSchool(code: string, name: string): Promise<string> {
-  const school = await prisma.school.create({ data: { code, name } });
+  const school = await prisma.school.create({
+    data: { code, name, settings: { create: {} } },
+  });
   return school.id;
 }
 

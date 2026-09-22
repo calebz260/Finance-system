@@ -1,78 +1,25 @@
 /**
  * Request schemas for fee configuration, charges and adjustments.
  *
- * The money rule is the one worth reading. Amounts arrive as **strings** and are
- * validated by `Money` itself, never by `z.number()`. A JSON number has already lost
- * precision by the time Zod sees it — `150000.10` parses to `150000.09999999999`, and a
- * validator that accepts it has accepted a wrong amount. Rejecting numbers at the edge
- * means the float never enters the system at all (Section 13A).
+ * The shared primitives — and in particular the money rule, which is the one worth
+ * reading — live in `lib/validation.ts` so that every module validates an amount the
+ * same way. A money validator that drifted between the fee endpoints and the payment
+ * endpoints would be one of them quietly accepting an amount the other refuses.
  */
 import { z } from 'zod';
 
-import { Money } from '@sfs/shared';
-
-const uuid = z.uuid({ error: 'That is not a valid id.' });
-
-const name = z.string().trim().min(1, 'This field is required.').max(120, 'That name is too long.');
-
-const description = z.string().trim().max(500, 'That description is too long.');
-
-/** A reason someone will read years later. Short enough to be a sentence, not an essay. */
-const reason = z
-  .string()
-  .trim()
-  .min(3, 'A reason is required, and it is recorded permanently.')
-  .max(500, 'That reason is too long.');
-
-const code = z
-  .string()
-  .trim()
-  .min(1, 'A code is required.')
-  .max(30, 'That code is too long.')
-  .regex(/^[A-Za-z0-9_-]+$/, 'Use letters, numbers, hyphens and underscores only.')
-  .transform((value) => value.toUpperCase());
-
-const expectedVersion = z.coerce
-  .number({ error: 'The record version is required so concurrent edits can be detected.' })
-  .int()
-  .min(0);
-
-/**
- * A monetary amount.
- *
- * A string, deliberately. `Money.isValid` applies the same parsing, scale and maximum
- * the storage layer uses, so anything that validates here is storable without a second
- * rounding step — there is no "valid in the API, too large for the column" gap.
- */
-const money = z
-  .string()
-  .trim()
-  .min(1, 'An amount is required.')
-  .refine((value) => Money.isValid(value), 'That is not a valid amount.')
-  // Normalised to scale 2 here so the service and the database always see the same
-  // string, whatever the client typed.
-  .transform((value) => Money.of(value).toString());
-
-/** Non-negative: a fee line of zero is legitimate, a negative one is a hidden discount. */
-const nonNegativeMoney = money.refine(
-  (value) => !Money.of(value).isNegative(),
-  'An amount cannot be negative.',
-);
-
-/** Strictly positive: an adjustment of zero moves nothing and should not be recorded. */
-const positiveMoney = money.refine(
-  (value) => Money.of(value).isPositive(),
-  'An amount must be greater than zero.',
-);
-
-const percentage = z
-  .string()
-  .trim()
-  .regex(/^\d{1,3}(\.\d{1,2})?$/, 'Use a percentage such as 25 or 12.5.')
-  .refine((value) => {
-    const parsed = Number(value);
-    return parsed > 0 && parsed <= 100;
-  }, 'A percentage must be above 0 and at most 100.');
+import {
+  codeField as code,
+  descriptionField as description,
+  expectedVersionField as expectedVersion,
+  nameField as name,
+  nonNegativeMoneyField as nonNegativeMoney,
+  paginationQueryFields,
+  percentageField as percentage,
+  positiveMoneyField as positiveMoney,
+  reasonField as reason,
+  uuidField as uuid,
+} from '../../lib/validation.js';
 
 const residency = z.enum(['DAY', 'BOARDING']);
 const reliefKind = z.enum(['DISCOUNT', 'SCHOLARSHIP', 'WAIVER', 'ADJUSTMENT']);
@@ -84,10 +31,7 @@ const approvalStatus = z.enum([
   'REVERSED',
 ]);
 
-const paginationQuery = {
-  page: z.coerce.number().int().min(1).optional(),
-  pageSize: z.coerce.number().int().min(1).optional(),
-};
+const paginationQuery = paginationQueryFields;
 
 /* ------------------------------------------------------------- fee categories */
 

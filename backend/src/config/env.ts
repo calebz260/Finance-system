@@ -11,6 +11,8 @@ import './load-dotenv.js';
 
 import { z } from 'zod';
 
+import { WEBHOOK_MAX_CLOCK_SKEW_SECONDS } from '@sfs/shared';
+
 const nodeEnvSchema = z.enum(['development', 'test', 'production']);
 
 /** Comma-separated list -> trimmed, de-duplicated array. */
@@ -147,6 +149,59 @@ const envSchema = z
     REFRESH_COOKIE_NAME: z.string().min(1).default('sfs_refresh'),
     REFRESH_COOKIE_SAMESITE: z.enum(['strict', 'lax', 'none']).default('strict'),
     REFRESH_COOKIE_DOMAIN: z.string().optional(),
+
+    /* ------------------------------------------------------ payments (Phase 5) */
+
+    /**
+     * Enables the sandbox payment provider: a **local simulator**, not a bank. It makes
+     * no outbound calls and settles only when a correctly signed callback is posted to
+     * the webhook endpoint, which is what makes the whole provider path — initiation,
+     * signature verification, replay rejection, finalisation — exercisable without a
+     * live integration or real money.
+     *
+     * Refused outright in production (see `superRefine`). A simulator that can mint
+     * confirmations must never be reachable where the confirmations mean something.
+     */
+    PAYMENT_SANDBOX_ENABLED: booleanish.default(false),
+
+    /**
+     * HMAC-SHA256 key the sandbox signs and verifies callbacks with. Has no default for
+     * the same reason `JWT_ACCESS_SECRET` has none: a known webhook secret is a
+     * forgeable payment confirmation, which is a forgeable credit to a student's
+     * account. Required whenever the sandbox is enabled.
+     */
+    PAYMENT_SANDBOX_WEBHOOK_SECRET: z.string().optional(),
+
+    /**
+     * How far a callback's signed timestamp may be from the server clock before it is
+     * refused as a replay. Kept configurable because clock discipline varies by
+     * provider, but the default is deliberately tight.
+     */
+    PAYMENT_WEBHOOK_MAX_SKEW_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(10)
+      .max(900)
+      .default(WEBHOOK_MAX_CLOCK_SKEW_SECONDS),
+
+    /* ------------------------------------------- proof-of-payment uploads (Phase 5) */
+
+    /**
+     * Where proof-of-payment files are written.
+     *
+     * Must be outside any web-servable path. The API serves no static files at all, so
+     * this holds by construction rather than by configuration discipline — evidence is
+     * only ever returned through an authenticated endpoint that re-checks who is asking.
+     */
+    UPLOAD_STORAGE_PATH: z.string().min(1).default('./var/uploads'),
+
+    /** Per-file ceiling. A bank slip is a photo or a one-page PDF, not a video. */
+    UPLOAD_MAX_BYTES: z.coerce
+      .number()
+      .int()
+      .min(1024)
+      .max(25 * 1024 * 1024)
+      .default(5 * 1024 * 1024),
   })
   .superRefine((value, ctx) => {
     if (value.NODE_ENV === 'production') {
@@ -178,6 +233,36 @@ const envSchema = z
           message:
             'SameSite=None is not allowed in production. Serve the web client and the API ' +
             'from the same site, or add CSRF protection before relaxing this.',
+        });
+      }
+
+      // The sandbox provider can mint payment confirmations. In production a confirmation
+      // credits a real student's account, so a simulator able to produce one is not a
+      // configuration mistake to warn about — it is a refusal to start.
+      if (value.PAYMENT_SANDBOX_ENABLED) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['PAYMENT_SANDBOX_ENABLED'],
+          message:
+            'The sandbox payment provider is a simulator and must never be enabled in ' +
+            'production: it can generate payment confirmations that credit the ledger.',
+        });
+      }
+    }
+
+    // Checked in every environment, not only production: a sandbox running without a
+    // secret would accept unsigned callbacks, and a developer whose local machine
+    // credits payments on an unsigned POST learns the wrong lesson about what the
+    // webhook endpoint guarantees.
+    if (value.PAYMENT_SANDBOX_ENABLED) {
+      const secret = value.PAYMENT_SANDBOX_WEBHOOK_SECRET ?? '';
+      if (secret.length < 32) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['PAYMENT_SANDBOX_WEBHOOK_SECRET'],
+          message:
+            'PAYMENT_SANDBOX_WEBHOOK_SECRET must be at least 32 characters when the ' +
+            'sandbox provider is enabled. A known webhook secret is a forgeable credit.',
         });
       }
     }
@@ -234,6 +319,19 @@ export interface AppConfig {
       /** Scoped to the refresh route, so it is not sent with ordinary API calls. */
       readonly path: string;
     };
+  };
+  readonly payments: {
+    readonly sandbox: {
+      readonly enabled: boolean;
+      /** Null unless the sandbox is enabled, in which case validation guaranteed it. */
+      readonly webhookSecret: string | null;
+    };
+    readonly webhookMaxSkewSeconds: number;
+  };
+  readonly uploads: {
+    /** Absolute or process-relative directory holding proof-of-payment files. */
+    readonly storagePath: string;
+    readonly maxBytes: number;
   };
 }
 
@@ -319,6 +417,21 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
         // that consume it, not alongside every ordinary API request.
         path: '/api/v1/auth',
       }),
+    }),
+    payments: Object.freeze({
+      sandbox: Object.freeze({
+        enabled: env.PAYMENT_SANDBOX_ENABLED,
+        // Narrowed to null when disabled rather than left as an empty string, so a
+        // caller has to handle "no sandbox" explicitly instead of signing with ''.
+        webhookSecret: env.PAYMENT_SANDBOX_ENABLED
+          ? (env.PAYMENT_SANDBOX_WEBHOOK_SECRET ?? null)
+          : null,
+      }),
+      webhookMaxSkewSeconds: env.PAYMENT_WEBHOOK_MAX_SKEW_SECONDS,
+    }),
+    uploads: Object.freeze({
+      storagePath: env.UPLOAD_STORAGE_PATH,
+      maxBytes: env.UPLOAD_MAX_BYTES,
     }),
   });
 }

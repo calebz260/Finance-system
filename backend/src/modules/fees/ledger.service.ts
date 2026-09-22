@@ -33,7 +33,11 @@ export type EntrySourceRef =
   | { readonly source: 'DISCOUNT'; readonly discountId: string }
   | { readonly source: 'SCHOLARSHIP'; readonly studentScholarshipId: string }
   | { readonly source: 'WAIVER'; readonly feeWaiverId: string }
-  | { readonly source: 'ADJUSTMENT'; readonly financialAdjustmentId: string };
+  | { readonly source: 'ADJUSTMENT'; readonly financialAdjustmentId: string }
+  // Phase 5. Added as one more member of an existing union, which is the whole of what
+  // introducing payments cost the ledger: the balance formula, the posting rules and the
+  // reversal mechanism below all apply to a payment unchanged.
+  | { readonly source: 'PAYMENT'; readonly paymentId: string };
 
 export interface PostEntryInput {
   readonly schoolId: string;
@@ -57,6 +61,7 @@ function refColumns(ref: EntrySourceRef): {
   studentScholarshipId?: string;
   feeWaiverId?: string;
   financialAdjustmentId?: string;
+  paymentId?: string;
 } {
   switch (ref.source) {
     case 'CHARGE':
@@ -69,6 +74,8 @@ function refColumns(ref: EntrySourceRef): {
       return { source: 'WAIVER', feeWaiverId: ref.feeWaiverId };
     case 'ADJUSTMENT':
       return { source: 'ADJUSTMENT', financialAdjustmentId: ref.financialAdjustmentId };
+    case 'PAYMENT':
+      return { source: 'PAYMENT', paymentId: ref.paymentId };
   }
 }
 
@@ -163,6 +170,7 @@ export async function reverseEntryFor(
       ...(columns.financialAdjustmentId !== undefined
         ? { financialAdjustmentId: columns.financialAdjustmentId }
         : {}),
+      ...(columns.paymentId !== undefined ? { paymentId: columns.paymentId } : {}),
       ...(columns.source === 'CHARGE' && columns.studentChargeId !== undefined
         ? { studentChargeId: columns.studentChargeId }
         : {}),

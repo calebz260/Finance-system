@@ -8,11 +8,23 @@ audit.
 Its purpose is to replace the school's manual fee-slip verification process, so the
 manual/offline payment path is a first-class workflow rather than an exception path.
 
-> **Build status: Phases 0–4 complete** — project foundation, the core domain schema,
-> authentication and authorisation, student and academic management including the bulk student
-> import, and fee management with a financial ledger. Payments, receipts and reporting land in
-> Phases 5–15 — see [docs/ROADMAP.md](docs/ROADMAP.md) for exactly what exists today and
-> what does not. Nothing in this repository pretends to be finished before it is.
+> **Build status: Phases 0–4 complete; Phase 5 complete locally and awaiting CI** — project
+> foundation, the core domain schema, authentication and authorisation, student and academic
+> management including the bulk student import, and fee management with a financial ledger.
+> Phase 5 adds the payment system — provider-collected payments with signature-verified
+> webhooks, the manual verification workflow, proof-of-payment upload, bank statement import
+> and reconciliation — and passes the full local gate, but **it has not yet run in CI, so it
+> is not shipped**. Receipts, notifications, dashboards and reporting land in Phases 6–15 —
+> see [docs/ROADMAP.md](docs/ROADMAP.md) for exactly what exists today and what does not.
+> Nothing in this repository pretends to be finished before it is.
+>
+> **No live payment integration exists.** Whether Bank of Kigali, Zigama CSS or Umwarimu SACCO
+> offer a payment-notification API is still unconfirmed
+> ([OPEN-QUESTIONS](docs/OPEN-QUESTIONS.md) #1 and #2), so no adapter has been invented for
+> them: they are collected through the manual verification workflow, which is what this system
+> exists to replace the paper version of. A **sandbox simulator** exercises the whole provider
+> path — initiation, signature verification, replay rejection, transactional crediting —
+> without a bank, and the API refuses to start with it enabled in production.
 
 ---
 
@@ -57,6 +69,26 @@ Until Phase 6 adds a notification channel, a password-reset link is not emailed.
 development the token is written to the API log; in any other environment the attempt is
 logged as an error and nothing is sent. See
 [ADR-013](docs/DECISIONS.md#adr-013-a-password-reset-link-goes-through-a-delivery-port-never-into-a-response-or-a-log).
+
+### Trying a payment locally
+
+The seed creates no charges and no payments on purpose — it configures what a school charges,
+it does not bill a term or bank money — so the payment path is walked rather than loaded:
+
+1. As the Bursar or Finance Manager, raise a charge (**Raise charges**, or `POST /charges`), so
+   a student owes something.
+2. As the Parent, open **Pay fees**. Every channel except mobile money is verified by a bursar,
+   which is deliberate: those are the only ways this school can actually be paid today.
+3. Record a bank-transfer claim and attach a slip. Nothing is credited — the claim is a
+   statement of intent.
+4. As a **different** bursar, open **Payments**, confirm the claim against the amount you
+   expect, and watch the balance move. The same bursar cannot confirm their own claim.
+
+To exercise the online path instead, set `PAYMENT_SANDBOX_ENABLED=true` and a
+`PAYMENT_SANDBOX_WEBHOOK_SECRET`, start a mobile-money payment, then post a signed callback to
+`/api/v1/payment-webhooks/SANDBOX`. `backend/tests/integration/payments.test.ts` shows exactly
+how one is signed; an unsigned, stale or duplicate callback is refused, which is the point of
+having it.
 
 > **Port note:** the PostgreSQL container publishes **5544**, because developer machines
 > commonly already run something on 5432. Override with `POSTGRES_PORT` in your shell or a

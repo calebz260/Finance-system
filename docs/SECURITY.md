@@ -20,8 +20,9 @@ between the two is always visible rather than assumed closed.
   `X-Forwarded-For` would let a client forge its IP, evading rate limits and corrupting the IP
   recorded in audit logs.
 - Global per-IP rate limiting, applied **before** body parsing so an abusive client cannot
-  make the server parse megabytes before being turned away. Tighter limiters for auth,
-  payment and webhook routes are written and applied when those routes exist.
+  make the server parse megabytes before being turned away. Tighter limiters apply to the
+  routes actually worth attacking: sign-in and password reset, payment initiation and
+  manual claims, and the provider webhook endpoint.
 - JSON body size limit (256 KB default); oversized bodies are rejected as `413`.
 - A client-supplied `X-Request-Id` is honoured only when it matches a safe opaque pattern,
   which prevents log forging through injected control characters.
@@ -155,10 +156,121 @@ application role, so the code cannot regain one.
 are Phase 11. Until then insert-only is an application-level property, enforced by there being
 no other code path, rather than by the database refusing.
 
+### Payments (Phase 5)
+
+Everything in the payment path follows from one sentence: **a claim that money arrived is not
+evidence that it did.** The only thing that credits a student's account is server-side
+verification, and there are exactly two kinds of it — a signed provider callback, and a named
+person confirming against a statement (ADR-003).
+
+**Crediting is one transaction.** A payment becomes SUCCESSFUL and posts its ledger CREDIT
+together, or neither happens. There is no state in which a payment reads as successful and no
+balance reflects it.
+
+**Three independent defences against a double credit**, because duplicate delivery is the
+normal behaviour of payment providers rather than an edge case:
+
+1. `SELECT … FOR UPDATE` on the payment, so a second finaliser waits and then sees the first
+   one's result;
+2. a conditional `UPDATE` from the finalisable statuses only, so a loser matches zero rows and
+   is told so;
+3. `financial_entries_one_opening_per_payment`, a partial unique index — the only one of the
+   three that is not application behaviour, and therefore the one that still holds if a future
+   code path forgets to lock.
+
+**Amount and currency are compared against the school's own record**, not taken from the
+confirmation. Crediting the claimed figure would let a compromised webhook secret credit any
+amount at all, and an under-collection would silently write off the difference. A mismatch is
+**parked, not resolved**: the payment moves to `REQUIRES_REVIEW` with both figures recorded.
+Nothing is rounded, split or adjusted to fit.
+
+**A terminal status is final.** `FAILED`, `CANCELLED`, `REVERSED` and `REFUNDED` have no
+outgoing transitions, so a callback arriving after a timeout was recorded as a failure cannot
+resurrect the payment. This is the rule that makes a provider's retry policy harmless.
+
+**Undoing is compensating, never destructive.** A reversal or refund keeps the payment, its
+verifier and its timestamp, and posts an opposing ledger entry linked to the credit it undoes.
+`payment.reverse` and `payment.refund` are separate permissions, neither held by a Bursar.
+
+### Webhooks (Phase 5)
+
+A callback is an unauthenticated request from the public internet claiming a payment
+succeeded. It is authenticated in fact, not by a session:
+
+- **The signature covers the raw bytes.** The webhook route is mounted ahead of the JSON body
+  parser and reads `express.raw`, because `JSON.stringify(req.body)` reproduces a body with the
+  same meaning and possibly different bytes — and a signature checked against a re-serialisation
+  is not checked against anything.
+- **The secret is chosen by the path, not the body.** A body nobody has authenticated does not
+  get to name the key that authenticates it.
+- **The signed timestamp is inside the digest**, and anything outside
+  `PAYMENT_WEBHOOK_MAX_SKEW_SECONDS` is refused as a replay. A signature over the body alone is
+  replayable forever: whoever captures one valid callback can resend it, and every delivery is
+  genuinely signed.
+- **Comparison is timing-safe.** A byte-by-byte `===` leaks how much of a guess was correct.
+- **The event is recorded before it is acted on.** `(provider_key, event_id)` is unique, so a
+  re-delivery loses the insert and is answered from the first delivery's record. A provider
+  retrying ten times produces one credit.
+- **Rejections are stored too.** One bad signature is a misconfiguration; a stream of them is
+  somebody forging confirmations, and that distinction only exists because the failures were
+  written down.
+- **The sender is told nothing.** Every refusal is the same fixed 401, whichever check failed:
+  "signature bad" versus "timestamp stale" versus "reference unknown" is a verification oracle.
+  The reason goes to `payment_webhook_events` and the audit log.
+
+The sandbox provider that exercises all of this is a **local simulator** and is refused
+outright when `NODE_ENV=production`, because a simulator able to mint confirmations must not be
+reachable where a confirmation credits a real account.
+
+### Proof-of-payment uploads (Phase 5)
+
+Phase 3 parsed imports in memory and stored nothing, deferring file handling to the phase that
+needed it. This is that phase, and the rules are:
+
+- **The stored name is server-generated and opaque** — a random 32-byte key laid out as
+  `ab/<62 hex>.<ext>`, never the uploaded filename, which is attacker-controlled. The same shape
+  is enforced by a database check constraint, so a key that could traverse a directory cannot
+  even be persisted.
+- **The content type comes from the bytes**, matched against a short allow-list (JPEG, PNG,
+  WEBP, PDF). A browser's `Content-Type` is a hint the uploader chooses.
+- **Files live outside any web-servable path.** The API serves no static files at all, so this
+  holds by construction. `PaymentEvidenceSummary` carries no URL: the bytes come from an
+  authenticated endpoint that re-checks who is asking, sent as an attachment with `nosniff`, so
+  there is no link to forward to somebody with no right to it. **Every download is audited.**
+- **Evidence is insert-only.** Replacing a slip inserts a new row and marks the old one
+  superseded, so "the document changed after the bursar looked at it" is visible.
+- **Scan state is recorded, not assumed.** No malware scanner is configured; the port exists and
+  writes `SKIPPED` honestly, so a reviewer can tell an unscanned file from a clean one. An
+  `INFECTED` verdict deletes the bytes and refuses the upload, so no row ever points at a file a
+  scanner objected to.
+
+### Reconciliation (Phase 5)
+
+The bank's record against the school's, with the difference visible in **both** directions:
+statement lines nobody has attributed are money the school holds and cannot explain, and live
+payments with no statement line are claims the bank has no record of. A system reporting only
+one side would let the other accumulate unnoticed.
+
+- **The automatic pass is deliberately narrow.** It attributes a line only when the payment's
+  own reference is quoted on it _and_ the amounts are exactly equal. A missed match costs a
+  bursar a minute of reading; a wrong one credits the wrong family.
+- **Suggestions are never decisions.** Each candidate is presented with the reason it was
+  suggested and whether the amount matches; several plausible candidates are reported as
+  ambiguity rather than resolved by picking the first.
+- **One line per payment, one payment per line**, by partial unique index.
+- **Money out is never attributed to a payment** — refused in the service and by a check
+  constraint, because a bank charge credited to a family is money the school never received.
+- **Crediting from reconciliation is verification**, so it needs `payment.verify_manual` as well
+  as `reconciliation.perform`, and the same separation of duties applies.
+- **A line that has credited a payment cannot be detached.** That would leave the credit with
+  nothing behind it; the payment is reversed instead, which is a decision with its own
+  permission and its own ledger entry.
+- The same statement file cannot be imported twice: its SHA-256 is unique per school.
+
 ### File upload, as it stands today (Phase 3)
 
-The bulk student import is the only endpoint that accepts a file. Until Phase 5 designs file
-handling properly, it is deliberately narrow:
+The bulk student import was the first endpoint to accept a file. It remains deliberately
+narrow, and it still stores nothing:
 
 - the upload is held **in memory only** and discarded when the request ends, so nothing is
   written to a path that has not yet been designed;
@@ -169,8 +281,10 @@ handling properly, it is deliberately narrow:
   upload can create a thousand students and their guardians;
 - the preview needs only `student.read`: it writes nothing.
 
-Malware scanning, storage outside any web-servable path and content validation for
-proof-of-payment documents arrive with Phase 5, which owns uploads.
+A bank statement is handled the same way, for a reason worth stating: it is a transport for
+rows that are themselves stored, so keeping the file as well would hold every family's
+transactions in a second place for no additional answer. Proof of payment is the opposite — it
+is the evidence behind one credit — and is stored, under the rules above.
 
 ## Arriving in later phases
 
@@ -179,9 +293,7 @@ proof-of-payment documents arrive with Phase 5, which owns uploads.
 | Audit logging of financial operations and configuration changes (login, roles and account changes are in place) | 2 onward |
 | Emailed password-reset links (the token, the expiry and the single-use rule already exist)                      | 6        |
 | Object-level authorisation (a parent may read only their own children's records)                                | 3        |
-| Idempotency keys, webhook signature verification, replay protection, duplicate-payment constraints              | 5        |
-| File-upload validation, storage outside any web-servable path, malware scanning                                 | 5        |
-| Separation of duties on manual payment verification                                                             | 5        |
+| A malware scanner for uploaded proof of payment (the port and the recorded state are in place)                  | —        |
 | Insert-only, optionally hash-chained audit logs                                                                 | 11       |
 | Rwanda Law N° 058/2021 data-protection review; retention policy per record type                                 | 11       |
 | Restore-tested backups, monitoring, error tracking, secret rotation                                             | 14       |

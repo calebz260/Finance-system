@@ -193,3 +193,88 @@ describe('loadConfig: authentication', () => {
     ).toBe('.school.rw');
   });
 });
+
+describe('loadConfig: payments', () => {
+  const productionEnv = {
+    ...minimalEnv,
+    NODE_ENV: 'production',
+    CORS_ORIGINS: 'https://fees.school.rw',
+  } satisfies NodeJS.ProcessEnv;
+
+  const sandboxSecret = 'sandbox-webhook-secret-with-enough-length-0123';
+
+  it('refuses to start with the payment simulator enabled in production', () => {
+    // The sandbox can mint payment confirmations, and in production a confirmation
+    // credits a real student's account. That is a refusal to start, not a warning.
+    expect(() =>
+      loadConfig({
+        ...productionEnv,
+        PAYMENT_SANDBOX_ENABLED: 'true',
+        PAYMENT_SANDBOX_WEBHOOK_SECRET: sandboxSecret,
+      }),
+    ).toThrow(/must never be enabled in production/);
+  });
+
+  it('refuses the simulator without a usable webhook secret, in every environment', () => {
+    // Checked outside production too: a developer whose machine credits payments on an
+    // unsigned POST learns the wrong lesson about what that endpoint guarantees.
+    expect(() => loadConfig({ ...minimalEnv, PAYMENT_SANDBOX_ENABLED: 'true' })).toThrow(
+      /at least 32 characters/,
+    );
+    expect(() =>
+      loadConfig({
+        ...minimalEnv,
+        PAYMENT_SANDBOX_ENABLED: 'true',
+        PAYMENT_SANDBOX_WEBHOOK_SECRET: 'too-short',
+      }),
+    ).toThrow(ConfigurationError);
+  });
+
+  it('holds no webhook secret at all when the simulator is off', () => {
+    const config = loadConfig({
+      ...minimalEnv,
+      PAYMENT_SANDBOX_WEBHOOK_SECRET: sandboxSecret,
+    });
+
+    expect(config.payments.sandbox.enabled).toBe(false);
+    // Narrowed to null rather than carried as a live secret nothing may use.
+    expect(config.payments.sandbox.webhookSecret).toBeNull();
+  });
+
+  it('accepts the simulator outside production and keeps its secret', () => {
+    const config = loadConfig({
+      ...minimalEnv,
+      PAYMENT_SANDBOX_ENABLED: 'true',
+      PAYMENT_SANDBOX_WEBHOOK_SECRET: sandboxSecret,
+    });
+
+    expect(config.payments.sandbox.enabled).toBe(true);
+    expect(config.payments.sandbox.webhookSecret).toBe(sandboxSecret);
+  });
+
+  it('defaults and bounds the replay window', () => {
+    expect(loadConfig(minimalEnv).payments.webhookMaxSkewSeconds).toBe(120);
+    expect(
+      loadConfig({ ...minimalEnv, PAYMENT_WEBHOOK_MAX_SKEW_SECONDS: '30' }).payments
+        .webhookMaxSkewSeconds,
+    ).toBe(30);
+
+    // A window of an hour would make a captured callback reusable for an hour.
+    expect(() => loadConfig({ ...minimalEnv, PAYMENT_WEBHOOK_MAX_SKEW_SECONDS: '5000' })).toThrow(
+      ConfigurationError,
+    );
+    expect(() => loadConfig({ ...minimalEnv, PAYMENT_WEBHOOK_MAX_SKEW_SECONDS: '1' })).toThrow(
+      ConfigurationError,
+    );
+  });
+
+  it('bounds the proof-of-payment upload size', () => {
+    expect(loadConfig(minimalEnv).uploads.maxBytes).toBe(5 * 1024 * 1024);
+    expect(loadConfig({ ...minimalEnv, UPLOAD_MAX_BYTES: '1048576' }).uploads.maxBytes).toBe(
+      1_048_576,
+    );
+    expect(() => loadConfig({ ...minimalEnv, UPLOAD_MAX_BYTES: '999999999' })).toThrow(
+      ConfigurationError,
+    );
+  });
+});

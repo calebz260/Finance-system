@@ -1,9 +1,9 @@
 /**
  * Rate limiting (Sections 14, 22, 32).
  *
- * A global ceiling protects the whole API; tighter limiters are exported for the routes
- * that are actually worth attacking -- login, password reset, payment initiation and
- * webhook endpoints -- and are applied when those routes are built in later phases.
+ * A global ceiling protects the whole API; tighter limiters guard the routes that are
+ * actually worth attacking -- login, password reset, payment initiation and manual claims,
+ * and the provider webhook endpoint -- and are applied by those routers.
  *
  * Note on correctness: limits are keyed on `req.ip`, which is only trustworthy because
  * `trust proxy` is configured from an explicit hop count (see `createApp`). A wrong hop

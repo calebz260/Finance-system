@@ -398,6 +398,15 @@ export const ROLE_DEFINITIONS: readonly RoleDefinition[] = [
       PermissionKey.OWN_PAYMENT_INITIATE,
       PermissionKey.OWN_RECEIPT_READ,
       PermissionKey.OWN_CLEARANCE_READ,
+      // A parent submitting a bank slip is recording a claim, so they hold the same
+      // permission a bursar does for it.
+      //
+      // **This permission is therefore not a test for staff.** Anything deciding whether a
+      // caller acts for the school rather than for their own family must key on a
+      // permission no family role holds — `payment.read` or `charge.read` — as
+      // `payment.access.ts` does. Treating `payment.record_manual_claim` as a staff marker
+      // would make every parent staff, and a parent who is staff can act for any student in
+      // the school.
       PermissionKey.PAYMENT_RECORD_MANUAL_CLAIM,
     ],
   },

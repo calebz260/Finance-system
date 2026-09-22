@@ -313,6 +313,73 @@ export function requestPaginated<TItem>(
   return requestEnvelope<PaginatedResponse<TItem>>(path, options);
 }
 
+/**
+ * Fetch a binary document, such as proof of payment.
+ *
+ * Deliberately not part of `request`, which unwraps a JSON envelope: this response *is*
+ * the file. It still carries the bearer token and the credentialed request, because the
+ * endpoint re-checks who is asking on every call — which is also why a stored document is
+ * fetched here and handed to the browser as a blob, rather than linked to with an `<a
+ * href>` that would send no credentials and could be forwarded to somebody with no right
+ * to it (Section 22).
+ */
+async function attemptDownload(path: string): Promise<Blob> {
+  const headers: Record<string, string> = {};
+  const accessToken = getAccessToken();
+  if (accessToken !== null) headers.Authorization = `Bearer ${accessToken}`;
+
+  let response: Response;
+  try {
+    response = await fetch(buildUrl(path, undefined), {
+      method: 'GET',
+      headers,
+      credentials: 'include',
+    });
+  } catch (cause) {
+    throw new ApiError({
+      code: ErrorCode.SERVICE_UNAVAILABLE,
+      message: 'Could not reach the server. Check your connection and try again.',
+      status: 0,
+      cause,
+    });
+  }
+
+  if (!response.ok) {
+    const requestId = response.headers.get(REQUEST_ID_HEADER) ?? undefined;
+    // A refusal still arrives as the shared JSON envelope, so it is read as one.
+    let payload: unknown;
+    try {
+      payload = JSON.parse(await response.text());
+    } catch {
+      payload = undefined;
+    }
+    if (isApiErrorResponse(payload)) throw errorFromBody(payload.error, response.status);
+
+    throw new ApiError({
+      code: response.status >= 500 ? ErrorCode.INTERNAL_ERROR : ErrorCode.MALFORMED_REQUEST,
+      message: fallbackMessage(response.status),
+      status: response.status,
+      ...(requestId !== undefined ? { requestId } : {}),
+    });
+  }
+
+  return response.blob();
+}
+
+/** A document download, renewing an expired access token once and retrying. */
+export async function downloadBlob(path: string): Promise<Blob> {
+  try {
+    return await attemptDownload(path);
+  } catch (error) {
+    if (!shouldAttemptRefresh(error, {})) throw error;
+
+    const renewed = await refreshAccessToken();
+    if (renewed === null) throw error;
+
+    return attemptDownload(path);
+  }
+}
+
 export const api = {
   get: <TData>(path: string, options?: Omit<RequestOptions, 'method' | 'body'>): Promise<TData> =>
     request<TData>(path, { ...options, method: 'GET' }),
